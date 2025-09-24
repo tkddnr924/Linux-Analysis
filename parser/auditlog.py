@@ -73,6 +73,7 @@ class AuditBody:
   tty = ""
   old_ses = ""
   res = ""
+  proctitle = ""
   msg: AuditMessage = None
 
   def __init__(self, body):
@@ -89,6 +90,8 @@ class AuditBody:
     self.tty = data.get('tty', '')
     self.old_ses = data.get('old-ses', '')
     self.res = data.get('res', '')
+    proctitle = data.get('proctitle', '')
+    self.proctitle = hex_to_text(proctitle)
 
     if len(parts) > 1:
       self.msg = AuditMessage(parts[1].replace('\'',''))
@@ -101,7 +104,7 @@ class AuditLog:
   line = ""
 
   def __init__(self, line):
-    self.line = line
+    self.line = str(line)
 
     parts = line.split(":")
 
@@ -130,6 +133,7 @@ def ensure_db(conn: sqlite3.Connection):
     tty TEXT,
     old_ses TEXT,
     body_res TEXT,
+    proctitle TEXT,
     op TEXT,
     grantors TEXT,
     acct TEXT,
@@ -171,6 +175,7 @@ def to_row(a: AuditLog):
     a.body.tty,
     a.body.old_ses,
     a.body.res,
+    a.body.proctitle,
     m.op if m else "",
     m.grantors if m else "",
     m.acct if m else "",
@@ -189,9 +194,9 @@ def to_row(a: AuditLog):
 def insert_rows(conn: sqlite3.Connection, rows):
   conn.executemany(f"""
   INSERT INTO {TABLE} (
-    type,date_time,sequence,pid,uid,auid,ses,old_auid,tty,old_ses,body_res,
+    type,date_time,sequence,pid,uid,auid,ses,old_auid,tty,old_ses,body_res, proctitle,
     op,grantors,acct,exe,hostname,addr,terminal,cmd,cwd,unit,comm,msg_res,raw_line
-  ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+  ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
   """, rows)
   conn.commit()
 
