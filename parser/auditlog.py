@@ -8,7 +8,7 @@ from utils.strings import kv_to_dict, hex_to_text
 from utils.times import epoch_to_iso
 
 AUDIT_LOG_GLOB: str = "audit.log*"
-DB_PATH = Path("result.db")
+DB_PATH = Path("result.sqlite")
 TABLE = "audit"
 
 # Audit Log Class
@@ -74,6 +74,11 @@ class AuditBody:
   old_ses = ""
   res = ""
   proctitle = ""
+  cwd = ""
+  unit = ""
+  comm = ""
+  subj = ""
+  op = ""
   msg: AuditMessage = None
 
   def __init__(self, body):
@@ -91,7 +96,13 @@ class AuditBody:
     self.old_ses = data.get('old-ses', '')
     self.res = data.get('res', '')
     proctitle = data.get('proctitle', '')
+    self.op = data.get('op', '')
+    self.subj = data.get('subj', '')
     self.proctitle = hex_to_text(proctitle)
+    self.cmd = data.get('cmd', '')
+    self.cwd = data.get('cwd', '')
+    self.unit = data.get('unit', '')
+    self.comm = data.get('comm', '')
 
     if len(parts) > 1:
       self.msg = AuditMessage(parts[1].replace('\'',''))
@@ -135,6 +146,7 @@ def ensure_db(conn: sqlite3.Connection):
     body_res TEXT,
     proctitle TEXT,
     op TEXT,
+    subj TEXT,
     grantors TEXT,
     acct TEXT,
     exe TEXT,
@@ -161,42 +173,69 @@ def table_has_data(conn: sqlite3.Connection) -> bool:
   cur = conn.execute(f"SELECT 1 FROM {TABLE} LIMIT 1")
   return cur.fetchone() is not None
 
-def to_row(a: AuditLog):
-  m = a.body.msg
+def to_row(audit: AuditLog):
+
+  _type = audit.header.type
+  _date_time = audit.header.date_time
+  _sequence = audit.header.sequence
+
+  _pid = audit.body.pid
+  _aid = audit.body.auid
+  _uid = audit.body.uid
+  _ses = audit.body.ses
+  _old_auid = audit.body.old_auid
+  _tty = audit.body.tty
+  _old_ses = audit.body.old_ses
+  _body_res = audit.body.res
+  _proctitle = audit.body.proctitle
+  _cmd = audit.body.cmd
+  _cwd = audit.body.cwd
+  _unit = audit.body.unit
+  _comm = audit.body.comm
+  _op = audit.body.op
+  _subj = audit.body.subj
+
+  _grantors = ""
+  _acct = ""
+  _exe = ""
+  _hostname = ""
+  _addr = ""
+  _terminal = ""
+  _msg_res = ""
+
+
+  if audit.body.msg is not None:
+    body_msg: AuditMessage = audit.body.msg
+
+    _op = body_msg.op
+    _grantors = body_msg.grantors
+    _acct = body_msg.acct
+    _exe = body_msg.exe
+    _hostname = body_msg.hostname
+    _addr = body_msg.addr
+    _terminal = body_msg.terminal
+    _msg_res = body_msg.res
+    _cmd = body_msg.cmd
+    _cwd = body_msg.cwd
+    _unit = body_msg.unit
+    _comm = body_msg.comm
+
   return (
-    a.header.type,
-    a.header.date_time,
-    a.header.sequence,
-    a.body.pid,
-    a.body.uid,
-    a.body.auid,
-    a.body.ses,
-    a.body.old_auid,
-    a.body.tty,
-    a.body.old_ses,
-    a.body.res,
-    a.body.proctitle,
-    m.op if m else "",
-    m.grantors if m else "",
-    m.acct if m else "",
-    m.exe if m else "",
-    m.hostname if m else "",
-    m.addr if m else "",
-    m.terminal if m else "",
-    m.cmd if m else "",
-    m.cwd if m else "",
-    m.unit if m else "",
-    m.comm if m else "",
-    m.res if m else "",
-    a.line,
+
+    _type, _date_time, _sequence,
+    _pid, _uid, _aid, _ses, _old_auid, _tty, _old_ses,
+    _body_res, _proctitle,
+    _op, _subj, _grantors, _acct, _exe, _hostname, _addr, _terminal,
+    _cmd, _cwd, _unit, _comm, _msg_res,
+    audit.line,
   )
 
 def insert_rows(conn: sqlite3.Connection, rows):
   conn.executemany(f"""
   INSERT INTO {TABLE} (
     type,date_time,sequence,pid,uid,auid,ses,old_auid,tty,old_ses,body_res, proctitle,
-    op,grantors,acct,exe,hostname,addr,terminal,cmd,cwd,unit,comm,msg_res,raw_line
-  ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    op,subj,grantors,acct,exe,hostname,addr,terminal,cmd,cwd,unit,comm,msg_res,raw_line
+  ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
   """, rows)
   conn.commit()
 
