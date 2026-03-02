@@ -17,7 +17,7 @@ parser.db 공통:
   - sysinfo     → analysis.db :: info 테이블
   - authlog     → analysis.db :: authlog_* 테이블
   - audit       → analysis.db :: audit_* 테이블
-  - cron        → analysis.db :: cron_sessions 테이블 (audit 테이블 기반)
+  - cron        → analysis.db :: cron_info 테이블 (audit 테이블 기반)
   - nginx       → analysis.db :: nginx_* 테이블
 
 실행 시:
@@ -260,7 +260,7 @@ def analyze_logs():
                         ("attack_ip", "authlog_attack_ip"), ("su", "authlog_su")],
             "audit":   [("login", "audit_login"), ("cmd", "audit_cmd"),
                         ("file", "audit_file")],
-            "cron":    [("session", "cron_sessions")],
+            "cron":    [("info", "cron_info")],
             "nginx":   [("top_ip", "nginx_top_ip"), ("attack", "nginx_attack"), ("webshell", "nginx_webshell")],
         }
         for key, label in table_labels.get(name, []):

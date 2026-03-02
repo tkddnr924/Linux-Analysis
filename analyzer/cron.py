@@ -1,46 +1,49 @@
 """
 analyzer/cron.py - cron 이벤트 분석기
 
-parser.db 의 audit 테이블에서 cron 관련 이벤트를 필터링하여
+parser.db 의 audit 테이블에서 cron 관련 이벤트를 분석하여
 analysis.db 에 아래 테이블로 저장합니다.
 
-  cron_sessions : ses 단위로 그루핑한 cron 작업 실행 요약
-                  (사용자, 시작/종료 시각, 실행 명령어, 성공 여부)
+  cron_info : 프로세스 단위로 집계한 cron 실행 통계
 
-cron 판별 기준:
-  - type = 'CRON'
-  - comm / unit / exe 에 'cron' 포함
+  process          | 실행된 프로세스/커맨드명 (EXECVE cmd 우선, 없으면 comm/exe)
+  user             | 실행 사용자 (uid)
+  first_seen       | 최초 실행 시각
+  last_seen        | 마지막 실행 시각
+  exec_count       | 실행 횟수
+  avg_duration_sec | 평균 실행 소요시간(초)  - 이상 실행 감지에 활용
+  total_duration_sec | 총 실행 소요시간(초) - 리소스 점유 분석에 활용
+
+프로세스명 결정 우선순위:
+  1. 동일 ses 의 EXECVE 레코드 cmd 필드
+  2. CRON 레코드의 comm 필드 (cron/crond 자체 제외)
+  3. CRON 레코드의 exe 필드
+  4. 'unknown'
 """
 
-import json
 import sqlite3
 
-from datetime import datetime
-
-SRC_TABLE     = "audit"
-TABLE_SESSION = "cron_sessions"
-TABLES        = [TABLE_SESSION]
+SRC_TABLE  = "audit"
+TABLE_INFO = "cron_info"
+TABLES     = [TABLE_INFO]
 
 
 # ── DB ────────────────────────────────────────────────
 def ensure_db(conn: sqlite3.Connection):
     conn.execute(f"""
-    CREATE TABLE IF NOT EXISTS {TABLE_SESSION} (
-        id           INTEGER PRIMARY KEY AUTOINCREMENT,
-        ses          TEXT NOT NULL,
-        auid         TEXT NOT NULL,
-        uid          TEXT NOT NULL,
-        acct         TEXT NOT NULL,
-        start_time   TEXT NOT NULL,
-        end_time     TEXT NOT NULL,
-        duration_sec REAL,
-        commands     TEXT NOT NULL,
-        result       TEXT NOT NULL,
-        event_count  INTEGER NOT NULL
+    CREATE TABLE IF NOT EXISTS {TABLE_INFO} (
+        id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+        process            TEXT NOT NULL,
+        user               TEXT NOT NULL,
+        first_seen         TEXT NOT NULL,
+        last_seen          TEXT NOT NULL,
+        exec_count         INTEGER NOT NULL,
+        avg_duration_sec   REAL,
+        total_duration_sec REAL
     )
     """)
-    conn.execute(f"CREATE INDEX IF NOT EXISTS idx_cron_ses   ON {TABLE_SESSION}(ses)")
-    conn.execute(f"CREATE INDEX IF NOT EXISTS idx_cron_start ON {TABLE_SESSION}(start_time)")
+    conn.execute(f"CREATE INDEX IF NOT EXISTS idx_cron_info_process ON {TABLE_INFO}(process)")
+    conn.execute(f"CREATE INDEX IF NOT EXISTS idx_cron_info_user    ON {TABLE_INFO}(user)")
     conn.commit()
 
 
@@ -57,81 +60,78 @@ def table_has_data(conn: sqlite3.Connection) -> bool:
 
 
 def insert_all(conn: sqlite3.Connection, results: dict):
-    if results.get("session"):
+    if results.get("info"):
         conn.executemany(f"""
-        INSERT INTO {TABLE_SESSION}
-            (ses, auid, uid, acct, start_time, end_time, duration_sec, commands, result, event_count)
-        VALUES (?,?,?,?,?,?,?,?,?,?)
-        """, results["session"])
+        INSERT INTO {TABLE_INFO}
+            (process, user, first_seen, last_seen, exec_count, avg_duration_sec, total_duration_sec)
+        VALUES (?,?,?,?,?,?,?)
+        """, results["info"])
     conn.commit()
 
 
 # ── 분석 로직 ─────────────────────────────────────────
 def analyze(src_conn: sqlite3.Connection) -> dict[str, list]:
-    return {"session": _analyze_sessions(src_conn)}
+    return {"info": _analyze_cron_info(src_conn)}
 
 
-def _analyze_sessions(src_conn: sqlite3.Connection) -> list[tuple]:
-    rows = src_conn.execute(f"""
-        SELECT ses, auid, uid, acct, date_time, cmd, body_res, msg_res
-        FROM   {SRC_TABLE}
-        WHERE  type = 'CRON'
-           OR  lower(comm) LIKE '%cron%'
-           OR  lower(unit) LIKE '%cron%'
-           OR  lower(exe)  LIKE '%cron%'
-        ORDER  BY ses, date_time
+def _analyze_cron_info(src_conn: sqlite3.Connection) -> list[tuple]:
+    return src_conn.execute(f"""
+        WITH cron_ses AS (
+            -- cron 관련 세션의 시작/종료 시각 집계
+            -- ses='4294967295' 는 미설정 세션으로 제외
+            SELECT
+                ses,
+                uid,
+                MIN(date_time) AS start_time,
+                MAX(date_time) AS end_time
+            FROM {SRC_TABLE}
+            WHERE (type = 'CRON'
+               OR  lower(comm) LIKE '%cron%'
+               OR  lower(unit) LIKE '%cron%')
+              AND ses NOT IN ('', '4294967295')
+            GROUP BY ses, uid
+        ),
+        execve_first AS (
+            -- 세션별 EXECVE cmd: 첫 번째 값만 사용 (fan-out 방지)
+            SELECT ses, MIN(cmd) AS cmd
+            FROM {SRC_TABLE}
+            WHERE type = 'EXECVE' AND cmd != ''
+              AND ses IN (SELECT ses FROM cron_ses)
+            GROUP BY ses
+        ),
+        cron_fallback AS (
+            -- EXECVE 없는 세션의 comm/exe 폴백
+            SELECT ses,
+                   MIN(CASE
+                       WHEN comm NOT IN ('', 'cron', 'crond') THEN comm
+                       WHEN exe  != ''                        THEN exe
+                       ELSE 'unknown'
+                   END) AS process
+            FROM {SRC_TABLE}
+            WHERE (type = 'CRON' OR lower(comm) LIKE '%cron%')
+              AND ses IN (SELECT ses FROM cron_ses)
+            GROUP BY ses
+        ),
+        ses_process AS (
+            -- 세션별 최종 프로세스명 결정
+            SELECT
+                cs.ses,
+                cs.uid,
+                COALESCE(NULLIF(ef.cmd, ''), cf.process, 'unknown') AS process
+            FROM cron_ses cs
+            LEFT JOIN execve_first  ef ON cs.ses = ef.ses
+            LEFT JOIN cron_fallback cf ON cs.ses = cf.ses
+        )
+        SELECT
+            sp.process,
+            sp.uid                                                              AS user,
+            MIN(cs.start_time)                                                  AS first_seen,
+            MAX(cs.start_time)                                                  AS last_seen,
+            COUNT(DISTINCT cs.ses)                                              AS exec_count,
+            AVG((julianday(cs.end_time) - julianday(cs.start_time)) * 86400)   AS avg_duration_sec,
+            SUM((julianday(cs.end_time) - julianday(cs.start_time)) * 86400)   AS total_duration_sec
+        FROM cron_ses cs
+        JOIN ses_process sp ON cs.ses = sp.ses
+        GROUP BY sp.process, sp.uid
+        ORDER BY exec_count DESC, first_seen
     """).fetchall()
-
-    sessions: dict = {}
-    for ses, auid, uid, acct, dt, cmd, body_res, msg_res in rows:
-        if not ses:
-            continue
-        if ses not in sessions:
-            sessions[ses] = dict(
-                ses=ses, auid=auid or "", uid=uid or "", acct=acct or "",
-                start_time=dt, end_time=dt, commands=[], results=[], count=0,
-            )
-        s = sessions[ses]
-        if dt and dt < s["start_time"]:
-            s["start_time"] = dt
-        if dt and dt > s["end_time"]:
-            s["end_time"] = dt
-        if cmd:
-            s["commands"].append(cmd)
-        res = (msg_res or body_res or "").strip("\"'")
-        if res:
-            s["results"].append(res)
-        if acct and not s["acct"]:
-            s["acct"] = acct
-        s["count"] += 1
-
-    result_rows = []
-    for s in sessions.values():
-        try:
-            fmt = "%Y-%m-%d %H:%M:%S.%f"
-            dur = (
-                datetime.strptime(s["end_time"], fmt)
-                - datetime.strptime(s["start_time"], fmt)
-            ).total_seconds()
-        except Exception:
-            dur = None
-
-        results = s["results"]
-        if "success" in results:
-            overall = "success"
-        elif "failed" in results:
-            overall = "failed"
-        else:
-            overall = ""
-
-        seen: set = set()
-        cmds = [c for c in s["commands"] if c and not (c in seen or seen.add(c))]
-
-        result_rows.append((
-            s["ses"], s["auid"], s["uid"], s["acct"],
-            s["start_time"], s["end_time"], dur,
-            json.dumps(cmds, ensure_ascii=False),
-            overall, s["count"],
-        ))
-
-    return result_rows
