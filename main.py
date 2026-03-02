@@ -16,6 +16,9 @@ parser.db 공통:
 분석기:
   - sysinfo     → analysis.db :: info 테이블
   - authlog     → analysis.db :: authlog_* 테이블
+  - audit       → analysis.db :: audit_* 테이블
+  - cron        → analysis.db :: cron_sessions 테이블 (audit 테이블 기반)
+  - nginx       → analysis.db :: nginx_* 테이블
 
 실행 시:
   - analysis.db 는 항상 새로 생성 (기존 파일 삭제)
@@ -33,6 +36,7 @@ import parser.authlog    as authlog
 import parser.nginxlog   as nginxlog
 import analyzer.authlog  as authlog_analyzer
 import analyzer.auditlog as auditlog_analyzer
+import analyzer.cron     as cron_analyzer
 import analyzer.sysinfo  as sysinfo_analyzer
 import analyzer.nginxlog as nginxlog_analyzer
 import analyzer.loginfo  as loginfo_analyzer
@@ -54,6 +58,7 @@ LOG_TARGETS = [
 ANALYZERS = [
     {"name": "authlog", "src_table": "authlog", "module": authlog_analyzer},
     {"name": "audit",   "src_table": "audit",   "module": auditlog_analyzer},
+    {"name": "cron",    "src_table": "audit",   "module": cron_analyzer},
     {"name": "nginx",   "src_table": "nginx",   "module": nginxlog_analyzer},
 ]
 
@@ -255,6 +260,7 @@ def analyze_logs():
                         ("attack_ip", "authlog_attack_ip"), ("su", "authlog_su")],
             "audit":   [("login", "audit_login"), ("cmd", "audit_cmd"),
                         ("file", "audit_file")],
+            "cron":    [("session", "cron_sessions")],
             "nginx":   [("top_ip", "nginx_top_ip"), ("attack", "nginx_attack"), ("webshell", "nginx_webshell")],
         }
         for key, label in table_labels.get(name, []):
