@@ -1,14 +1,11 @@
-import argparse
 import re
 import sqlite3
 
 from pathlib import Path
-from utils.files import count_glob
-from utils.strings import kv_to_dict, hex_to_text
-from utils.times import epoch_to_iso
+from parser.utils.strings import kv_to_dict, hex_to_text
+from parser.utils.times import epoch_to_iso
 
 AUDIT_LOG_GLOB: str = "audit.log*"
-DB_PATH = Path("result.sqlite")
 TABLE = "audit"
 
 # Audit Log Class
@@ -249,58 +246,6 @@ def parse(file_path):
 
   return result
 
-def config():
-  parser = argparse.ArgumentParser(
-    prog="auditlog.py", 
-    description="Audit Log Parser",
-    epilog=f'패턴: "{AUDIT_LOG_GLOB}"'
-    )
-  
-  parser.add_argument(
-        "-d", "--dir",
-        dest="log_dir",
-        type=Path,
-        help="audit 로그 디렉터리 경로 (기본: %(default)s)"
-    )
-
-  args = parser.parse_args()
-
-  return args
-
-def main():
-  args = config()
-  
-  path = Path(args.log_dir)
-  print(f"[TARGET DIRECTORY] {path}")
-
-  count = count_glob(path, AUDIT_LOG_GLOB)
-  print(f"[AUDIT LOG] {count}")
-
-  if not DB_PATH.exists():
-    DB_PATH.touch()
-
-  conn = sqlite3.connect(DB_PATH)
-  ensure_db(conn)
-
-  if table_has_data(conn):
-    print("[INFO] audit 테이블에 데이터가 있어 파싱을 건너뜁니다.")
-    conn.close()
-    return
-
-  batch = []
-  for audit_file in path.glob(AUDIT_LOG_GLOB):
-    if not audit_file.is_file():
-      continue
-    for audit in parse(audit_file):
-      batch.append(to_row(audit))
-      if len(batch) >= 1000:
-        insert_rows(conn, batch)
-        batch.clear()
-  if batch:
-    insert_rows(conn, batch)
-  conn.close()
-  print("[INFO] 저장 완료")
-
 
 if __name__ == "__main__":
-  main()
+  print("[INFO] auditlog.py는 라이브러리입니다. main.py를 통해 실행하세요.")

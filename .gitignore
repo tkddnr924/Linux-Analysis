@@ -1,5 +1,8 @@
-result.*
+*.db
 .vscode
 .venv
 __pycache__
 .DS_Store
+*.bak
+target/
+.claude
