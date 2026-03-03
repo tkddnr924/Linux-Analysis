@@ -65,6 +65,8 @@ jobs:
     needs: [build-python, build-electron]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: write   # Release 생성 및 파일 업로드 권한
 
     steps:
       - name: Download all artifacts
