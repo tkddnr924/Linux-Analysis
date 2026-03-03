@@ -2,6 +2,7 @@
   "appId": "com.linuxanalysis.viewer",
   "productName": "Linux Analysis Viewer",
   "copyright": "Copyright © 2024",
+  "publish": "never",
 
   "directories": {
     "output": "dist",
