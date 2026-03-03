@@ -57,7 +57,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: electron-win
-          path: gui/dist/
+          path: |
+            gui/dist/*.exe
+            gui/dist/*.blockmap
 
   # ── GitHub Release 자동 생성 ─────────────────────────
   release:
