@@ -51,8 +51,7 @@ DECOMP_DIR   = Path(".decomp")   # 압축 해제 임시 디렉토리
 LOG_TARGETS = [
     {"name": "audit",   "glob": auditlog.AUDIT_LOG_GLOB,   "module": auditlog},
     {"name": "authlog", "glob": authlog.AUTH_LOG_GLOB,     "module": authlog},
-    {"name": "nginx",   "glob": nginxlog.NGINX_LOG_GLOB,   "module": nginxlog,
-     "search_dir": Path("target/NonVolatile/var/log/nginx")},
+    {"name": "nginx",   "glob": nginxlog.NGINX_LOG_GLOB,   "module": nginxlog},
 ]
 
 ANALYZERS = [
@@ -233,9 +232,12 @@ def analyze_logs():
     ANALYSIS_DB.touch(exist_ok=True)
     dest_conn = sqlite3.connect(ANALYSIS_DB)
 
-    # ── 서버 기본 정보 info 테이블 ──────────────────────
-    print("\n[INFO] 서버 기본 정보 수집 중...")
-    sysinfo_analyzer.run(dest_conn)
+    # ── 서버 기본 정보 info 테이블 (아티팩트가 있을 때만) ──
+    if Path("target/Volatile").exists() or Path("target/NonVolatile").exists():
+        print("\n[INFO] 서버 기본 정보 수집 중...")
+        sysinfo_analyzer.run(dest_conn)
+    else:
+        print("\n[INFO] Volatile/NonVolatile 없음 → sysinfo 건너뜁니다.")
 
     for item in ANALYZERS:
         name = item["name"]
