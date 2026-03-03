@@ -2,13 +2,14 @@
   "name": "linux-analysis-viewer",
   "version": "1.0.0",
   "description": "Linux 포렌식 분석 결과 뷰어 (analysis.db)",
+  "author": "Linux Analysis",
   "main": "main.js",
   "engines": {
     "node": ">=22"
   },
   "scripts": {
-    "start": "electron .",
-    "postinstall": "electron-rebuild -f -w better-sqlite3",
+    "start":       "electron .",
+    "postinstall": "electron-builder install-app-deps",
 
     "build":       "electron-builder --config electron-builder.json",
     "build:mac":   "electron-builder --mac   --config electron-builder.json",
@@ -19,7 +20,6 @@
     "better-sqlite3": "^9.6.0"
   },
   "devDependencies": {
-    "@electron/rebuild": "^3.6.0",
     "electron": "^30.0.0",
     "electron-builder": "^24.13.3"
   }

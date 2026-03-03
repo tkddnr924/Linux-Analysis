@@ -17,8 +17,6 @@
     "!node_modules/.bin/**"
   ],
 
-  "nativeRebuilder": "legacy",
-
   "win": {
     "target": [
       { "target": "nsis",     "arch": ["x64"] },
