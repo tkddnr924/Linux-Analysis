@@ -66,7 +66,12 @@ Linux-Analysis/
 │
 ├── target/                  # 분석 대상 로그 (하위 구조 무관)
 ├── parser.db                # 파싱 결과 (자동 생성)
-└── analysis.db              # 분석 결과 (실행 시 재생성)
+├── analysis.db              # 분석 결과 (실행 시 재생성)
+└── gui/                     # Electron 기반 analysis.db 뷰어
+    ├── main.js              # Electron 메인 프로세스
+    ├── preload.js           # IPC 브릿지
+    ├── renderer/            # UI (HTML/CSS/JS)
+    └── package.json         # Node 22 의존성
 ```
 
 ---
@@ -180,6 +185,21 @@ Linux-Analysis/
 `file_name`, `file_path`, `src_ip`, `first_seen`, `last_seen`, `access_count`, `bytes_min`, `bytes_max`, `bytes_distinct`, `suspicion_score`, `suspicion_flags`
 
 **탐지 기준:** `known_webshell` `variable_response` `script_in_media` `suspicious_path` `high_freq_access` `persistent_access`
+
+---
+
+## GUI 뷰어
+
+`analysis.db` 결과를 데스크톱 앱으로 탐색합니다.
+
+```bash
+cd gui/
+npm install   # 최초 1회 (better-sqlite3 자동 재빌드)
+npm start
+```
+
+> **요구사항:** Node.js 22+
+> 기동 시 프로젝트 루트의 `analysis.db` 자동 감지·로드합니다.
 
 ---
 

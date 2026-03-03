@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline';" />
+  <title>Linux Analysis Viewer</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+  <!-- ── 타이틀바 ── -->
+  <header class="titlebar">
+    <div class="titlebar-brand">
+      <span class="brand-icon">🔍</span>
+      <span class="brand-name">Linux Analysis Viewer</span>
+    </div>
+    <div class="titlebar-center">
+      <span id="db-path" class="db-path">데이터베이스를 선택하세요</span>
+    </div>
+    <div class="titlebar-actions">
+      <button id="btn-open" class="btn btn-primary">
+        <span>📂</span> DB 열기
+      </button>
+    </div>
+  </header>
+
+  <!-- ── 메인 레이아웃 ── -->
+  <div class="layout">
+
+    <!-- 사이드바 -->
+    <aside class="sidebar">
+      <div id="sidebar-content" class="sidebar-content">
+        <div class="sidebar-empty">
+          <p>DB를 열면 테이블 목록이<br/>표시됩니다.</p>
+        </div>
+      </div>
+    </aside>
+
+    <!-- 콘텐츠 영역 -->
+    <main class="content">
+
+      <!-- 빈 화면 -->
+      <div id="welcome" class="welcome">
+        <div class="welcome-inner">
+          <div class="welcome-icon">🛡️</div>
+          <h2>Linux Analysis Viewer</h2>
+          <p>analysis.db 를 열어 분석 결과를 확인하세요.</p>
+          <button class="btn btn-primary btn-lg" id="btn-open-2">
+            📂 &nbsp;DB 열기
+          </button>
+          <p class="welcome-hint" id="auto-hint" style="display:none">
+            프로젝트 루트에서 <code>analysis.db</code>를 자동 감지했습니다.
+          </p>
+        </div>
+      </div>
+
+      <!-- 테이블 뷰 -->
+      <div id="table-view" class="table-view hidden">
+
+        <!-- 툴바 -->
+        <div class="toolbar">
+          <div class="toolbar-left">
+            <h2 id="table-title" class="table-title">—</h2>
+            <span id="total-badge" class="badge">0건</span>
+          </div>
+          <div class="toolbar-right">
+            <div class="search-wrap">
+              <span class="search-icon">🔎</span>
+              <input id="search-input" class="search-input" type="text"
+                     placeholder="검색..." autocomplete="off" spellcheck="false" />
+              <button id="btn-clear" class="btn-icon hidden" title="검색 초기화">✕</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- 데이터 테이블 -->
+        <div class="table-wrap">
+          <div id="data-table" class="data-table"></div>
+        </div>
+
+        <!-- 페이지네이션 -->
+        <div class="pagination">
+          <button id="btn-prev" class="btn btn-ghost" disabled>‹ 이전</button>
+          <span id="page-info" class="page-info">1 / 1</span>
+          <button id="btn-next" class="btn btn-ghost" disabled>다음 ›</button>
+          <span id="pagination-info" class="pagination-count"></span>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <!-- ── 상태바 ── -->
+  <footer class="statusbar">
+    <span id="status-left">준비</span>
+    <span id="status-right" class="status-right"></span>
+  </footer>
+
+  <!-- ── 행 상세 모달 ── -->
+  <div id="row-modal" class="modal hidden" role="dialog" aria-modal="true">
+    <div class="modal-overlay" id="modal-overlay"></div>
+    <div class="modal-box">
+      <div class="modal-header">
+        <span class="modal-title">행 상세 정보</span>
+        <button class="modal-close" id="modal-close" title="닫기">✕</button>
+      </div>
+      <div class="modal-body" id="modal-body"></div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

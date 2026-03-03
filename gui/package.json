@@ -1,0 +1,20 @@
+{
+  "name": "linux-analysis-viewer",
+  "version": "1.0.0",
+  "description": "Linux 포렌식 분석 결과 뷰어 (analysis.db)",
+  "main": "main.js",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "electron .",
+    "postinstall": "electron-rebuild -f -w better-sqlite3"
+  },
+  "dependencies": {
+    "better-sqlite3": "^9.6.0"
+  },
+  "devDependencies": {
+    "@electron/rebuild": "^3.6.0",
+    "electron": "^30.0.0"
+  }
+}
