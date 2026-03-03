@@ -63,6 +63,8 @@ let currentPage    = 0
 let currentSearch  = ''
 let currentTotal   = 0
 let currentColumns = []
+let currentSortCol = null      // 정렬 컬럼 (null = 기본 순서)
+let currentSortDir = 'ASC'     // 'ASC' | 'DESC'
 let searchTimer    = null
 let tableCountMap  = new Map()  // name → count
 
@@ -193,9 +195,11 @@ function sidebarItem (name, label, count) {
 
 // ── 테이블 선택 ──────────────────────────────────────
 async function selectTable (name) {
-  currentTable  = name
-  currentPage   = 0
-  currentSearch = ''
+  currentTable   = name
+  currentPage    = 0
+  currentSearch  = ''
+  currentSortCol = null
+  currentSortDir = 'ASC'
   elSearchInput.value = ''
   elBtnClear.classList.add('hidden')
 
@@ -213,10 +217,12 @@ async function loadData () {
   setStatus('로딩 중…')
 
   const res = await window.api.getTableData({
-    table:  currentTable,
-    search: currentSearch,
-    limit:  PAGE_SIZE,
-    offset: currentPage * PAGE_SIZE,
+    table:   currentTable,
+    search:  currentSearch,
+    limit:   PAGE_SIZE,
+    offset:  currentPage * PAGE_SIZE,
+    sortCol: currentSortCol,
+    sortDir: currentSortDir,
   })
 
   if (res.error) {
@@ -250,7 +256,12 @@ function renderTable (columns, rows) {
   }
 
   let html = '<table><thead><tr>'
-  for (const col of columns) html += `<th>${escHtml(col)}</th>`
+  for (const col of columns) {
+    const isActive = col === currentSortCol
+    const arrow    = isActive ? (currentSortDir === 'ASC' ? ' ↑' : ' ↓') : ''
+    const cls      = isActive ? ' class="th-sorted"' : ''
+    html += `<th${cls} data-col="${escHtml(col)}">${escHtml(col)}<span class="th-sort-icon">${arrow}</span></th>`
+  }
   html += '</tr></thead><tbody>'
 
   if (!rows.length) {
@@ -393,6 +404,27 @@ elSidebar.addEventListener('click', async e => {
   if (item && item.dataset.table) {
     await selectTable(item.dataset.table)
   }
+})
+
+// 테이블 헤더 클릭 → 정렬 토글 (이벤트 위임)
+elDataTable.addEventListener('click', async e => {
+  const th = e.target.closest('th[data-col]')
+  if (!th) return
+  const col = th.dataset.col
+  if (currentSortCol === col) {
+    // 같은 컬럼: ASC → DESC → 해제 순환
+    if (currentSortDir === 'ASC') {
+      currentSortDir = 'DESC'
+    } else {
+      currentSortCol = null
+      currentSortDir = 'ASC'
+    }
+  } else {
+    currentSortCol = col
+    currentSortDir = 'ASC'
+  }
+  currentPage = 0
+  await loadData()
 })
 
 $('btn-open').addEventListener('click', onClickOpen)

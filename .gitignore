@@ -6,3 +6,11 @@ __pycache__
 *.bak
 target/
 .claude
+
+# PyInstaller 빌드 결과물
+dist/
+build/
+*.spec.bak
+
+# Electron 빌드 결과물
+gui/dist/

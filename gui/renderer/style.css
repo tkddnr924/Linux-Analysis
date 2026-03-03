@@ -372,6 +372,32 @@ html, body {
 }
 .data-table thead th:last-child { border-right: none; }
 
+/* 정렬 가능한 헤더 */
+.data-table thead th[data-col] {
+  cursor: pointer;
+  transition: background .12s, color .12s;
+}
+.data-table thead th[data-col]:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+/* 정렬 활성 헤더 */
+.data-table thead th.th-sorted {
+  color: var(--accent-blue);
+  background: rgba(56, 139, 253, 0.08);
+  border-bottom: 2px solid var(--accent-blue);
+}
+
+/* 정렬 화살표 아이콘 */
+.th-sort-icon {
+  display: inline-block;
+  margin-left: 4px;
+  font-size: 10px;
+  opacity: 0.85;
+  min-width: 10px;
+}
+
 .data-table tbody tr {
   cursor: pointer;
   border-bottom: 1px solid var(--border-subtle);

@@ -124,8 +124,8 @@ ipcMain.handle('db:getTables', () => {
   }
 })
 
-// ── IPC: 테이블 데이터 (페이지네이션 + 검색) ────────
-ipcMain.handle('db:getTableData', (_e, { table, search, limit, offset }) => {
+// ── IPC: 테이블 데이터 (페이지네이션 + 검색 + 정렬) ─
+ipcMain.handle('db:getTableData', (_e, { table, search, limit, offset, sortCol, sortDir }) => {
   if (!db) return { rows: [], total: 0, columns: [] }
   try {
     const cols = db.prepare(`PRAGMA table_info("${table}")`).all().map(r => r.name)
@@ -138,8 +138,15 @@ ipcMain.handle('db:getTableData', (_e, { table, search, limit, offset }) => {
       cols.forEach(() => params.push(`%${search.trim()}%`))
     }
 
+    // ORDER BY: sortCol이 실제 컬럼명인지 검증 후 적용
+    let order = ''
+    if (sortCol && cols.includes(sortCol)) {
+      const dir = sortDir === 'DESC' ? 'DESC' : 'ASC'
+      order = `ORDER BY "${sortCol}" ${dir}`
+    }
+
     const total = db.prepare(`SELECT COUNT(*) as c FROM "${table}" ${where}`).get(...params).c
-    const rows  = db.prepare(`SELECT * FROM "${table}" ${where} LIMIT ? OFFSET ?`).all(...params, limit, offset)
+    const rows  = db.prepare(`SELECT * FROM "${table}" ${where} ${order} LIMIT ? OFFSET ?`).all(...params, limit, offset)
 
     return { rows, total, columns: cols }
   } catch (e) {

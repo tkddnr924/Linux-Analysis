@@ -1,0 +1,110 @@
+name: Build
+
+on:
+  push:
+    tags:
+      - 'v*'          # v1.0.0 같은 태그를 push하면 자동 빌드
+  workflow_dispatch:  # Actions 탭에서 수동 실행도 가능
+
+jobs:
+  # ── Python 분석기 빌드 ────────────────────────────────
+  build-python:
+    name: Python (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            artifact: linux-analyzer.exe
+            dist:     dist/linux-analyzer.exe
+          - os: macos-latest
+            artifact: linux-analyzer-mac
+            dist:     dist/linux-analyzer
+          - os: ubuntu-latest
+            artifact: linux-analyzer-linux
+            dist:     dist/linux-analyzer
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller
+          # requirements.txt 있으면 설치
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+        shell: bash
+
+      - name: Build with PyInstaller
+        run: pyinstaller linux-analyzer.spec
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.dist }}
+
+  # ── Electron GUI 빌드 ─────────────────────────────────
+  build-electron:
+    name: Electron (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            artifact: electron-win
+            dist:     gui/dist
+          - os: macos-latest
+            artifact: electron-mac
+            dist:     gui/dist
+          - os: ubuntu-latest
+            artifact: electron-linux
+            dist:     gui/dist
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install & rebuild native modules
+        working-directory: gui
+        run: npm install
+
+      - name: Build Electron app
+        working-directory: gui
+        run: npm run build
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.dist }}
+
+  # ── GitHub Release 자동 생성 ─────────────────────────
+  release:
+    name: Create Release
+    needs: [build-python, build-electron]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**/*
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
