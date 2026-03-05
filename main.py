@@ -195,6 +195,9 @@ def _process_parse(conn: sqlite3.Connection, name: str, files: list[Path], mod):
             print(f"  [SKIP] {f.name} (MD5: {checksum[:8]}... 이미 파싱됨)")
             continue
 
+        # 원본 파일의 mtime 기록 (압축 해제 전)
+        file_mtime = datetime.fromtimestamp(f.stat().st_mtime)
+
         # 압축 해제 (필요 시)
         parse_target, was_decompressed = _resolve_file(f)
         label = f"{f.name} → {parse_target.name}" if was_decompressed else f.name
@@ -202,7 +205,12 @@ def _process_parse(conn: sqlite3.Connection, name: str, files: list[Path], mod):
 
         try:
             batch = []
-            for entry in mod.parse(parse_target):
+            # authlog 모듈은 file_mtime 을 받아 연도를 추론
+            parse_kwargs = {}
+            if name == "authlog":
+                parse_kwargs["file_mtime"] = file_mtime
+
+            for entry in mod.parse(parse_target, **parse_kwargs):
                 batch.append(mod.to_row(entry))
                 if len(batch) >= 1000:
                     mod.insert_rows(conn, batch)

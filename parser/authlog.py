@@ -1,8 +1,13 @@
 """
 authlog.py - /var/log/auth.log 파서
 
-로그 형식:
-  Mon DD HH:MM:SS hostname service[pid]: message
+지원 로그 형식:
+  1. Syslog (BSD)  : Mon DD HH:MM:SS hostname service[pid]: message
+     - Debian, Ubuntu, Amazon Linux 등 대부분의 배포판 기본 형식
+     - 연도가 없으므로 파일 mtime 에서 추론
+  2. ISO 8601      : YYYY-MM-DDTHH:MM:SS.ffffff+TZ hostname service[pid]: message
+     - rsyslog 고정밀 타임스탬프 설정 시 사용
+     - openSUSE, 일부 RHEL/CentOS 커스텀 설정
 
 주요 서비스: sshd, sudo, CRON, pam_unix, su 등
 """
@@ -15,6 +20,10 @@ from datetime import datetime
 AUTH_LOG_GLOB: str = "auth.log*"
 TABLE = "authlog"
 
+# ── 포맷 상수 ─────────────────────────────────────────
+FMT_SYSLOG = "syslog"     # Mon DD HH:MM:SS  (연도 없음)
+FMT_ISO    = "iso8601"     # YYYY-MM-DDTHH:MM:SS[.us][+TZ]
+
 # ── 날짜 파싱 ──────────────────────────────────────────
 _MONTHS = {
     "Jan": 1, "Feb": 2, "Mar": 3, "Apr": 4,
@@ -22,21 +31,79 @@ _MONTHS = {
     "Sep": 9, "Oct": 10, "Nov": 11, "Dec": 12,
 }
 
-def _parse_datetime(month: str, day: str, time: str, year: int = None) -> str:
-    """'Mar  1 00:07:35' → 'YYYY-MM-DD HH:MM:SS'"""
-    if year is None:
-        year = datetime.now().year
+
+def _parse_syslog_datetime(month: str, day: str, time: str, year: int) -> str:
+    """'Mar  1 00:07:35' + year → 'YYYY-MM-DD HH:MM:SS'"""
     m = _MONTHS.get(month, 1)
     d = int(day.strip())
     return f"{year}-{m:02d}-{d:02d} {time}"
 
 
+def _parse_iso_datetime(iso_str: str) -> str:
+    """'2024-01-15T00:07:35.123456+09:00' → '2024-01-15 00:07:35'"""
+    # T 기준으로 날짜/시간 분리
+    if "T" in iso_str:
+        date_part, rest = iso_str.split("T", 1)
+        # 소수점 이하, 타임존 제거 → HH:MM:SS 만 추출
+        time_part = rest[:8]  # HH:MM:SS
+        return f"{date_part} {time_part}"
+    # T 없이 공백으로 구분된 경우 (YYYY-MM-DD HH:MM:SS)
+    return iso_str[:19]
+
+
+def _infer_year(file_mtime: datetime | None, month: int) -> int:
+    """
+    파일 mtime 에서 연도를 추론.
+    연도 경계 처리: 로그가 12월인데 파일 mtime 이 다음 해 1~2월이면
+    → 전년도로 판단.
+    """
+    if file_mtime is None:
+        return datetime.now().year
+    file_year = file_mtime.year
+    file_month = file_mtime.month
+    # 로그 월이 11~12월인데 파일 mtime 이 1~2월이면 → 전년도
+    if month >= 11 and file_month <= 2:
+        return file_year - 1
+    return file_year
+
+
 # ── 헤더 파싱 ─────────────────────────────────────────
+
+# 형식 1: Syslog (BSD)
 # Mar  1 00:07:35 ip-172-31-47-239 sshd[1664994]: ...
-_HEADER_RE = re.compile(
+_RE_SYSLOG = re.compile(
     r'^(\w{3})\s+(\d+)\s+(\d{2}:\d{2}:\d{2})\s+(\S+)\s+(\S+?)(?:\[(\d+)\])?:\s*(.*)',
     re.DOTALL
 )
+
+# 형식 2: ISO 8601
+# 2024-01-15T00:07:35.123456+09:00 hostname sshd[1234]: ...
+# 2024-01-15T00:07:35+09:00 hostname sshd[1234]: ...
+_RE_ISO = re.compile(
+    r'^(\d{4}-\d{2}-\d{2}T\S+?)\s+(\S+)\s+(\S+?)(?:\[(\d+)\])?:\s*(.*)',
+    re.DOTALL
+)
+
+# ── 포맷 자동 감지 ────────────────────────────────────
+def _detect_format(file_path: Path) -> str:
+    """파일 첫 10줄을 읽어 로그 형식을 감지한다."""
+    try:
+        with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+            for i, line in enumerate(f):
+                if i >= 10:
+                    break
+                line = line.strip()
+                if not line:
+                    continue
+                # ISO 8601 형식 먼저 체크 (더 구체적)
+                if _RE_ISO.match(line):
+                    return FMT_ISO
+                if _RE_SYSLOG.match(line):
+                    return FMT_SYSLOG
+    except Exception:
+        pass
+    return FMT_SYSLOG   # 기본값: syslog
+
 
 # ── 메시지 패턴 ───────────────────────────────────────
 _PATTERNS = {
@@ -160,7 +227,8 @@ def _classify(service: str, message: str) -> tuple[str, str, str, str, str]:
 
 # ── 데이터 클래스 ─────────────────────────────────────
 class AuthLogEntry:
-    def __init__(self, line: str, year: int = None):
+    def __init__(self, line: str, fmt: str = FMT_SYSLOG,
+                 year: int | None = None, file_mtime: datetime | None = None):
         self.raw_line = line.rstrip()
         self.date_time = ""
         self.hostname = ""
@@ -173,17 +241,40 @@ class AuthLogEntry:
         self.port = ""
         self.detail = ""
 
-        m = _HEADER_RE.match(line)
+        if fmt == FMT_ISO:
+            self._parse_iso(line)
+        else:
+            self._parse_syslog(line, year, file_mtime)
+
+    def _parse_syslog(self, line: str, year: int | None, file_mtime: datetime | None):
+        m = _RE_SYSLOG.match(line)
         if not m:
             return
+        month_str, day, time, hostname, service, pid, message = m.groups()
+        # 연도 추론: 명시적 year → file_mtime 기반 → 현재 연도
+        month_num = _MONTHS.get(month_str, 1)
+        if year is not None:
+            resolved_year = year
+        else:
+            resolved_year = _infer_year(file_mtime, month_num)
+        self.date_time = _parse_syslog_datetime(month_str, day, time, resolved_year)
+        self.hostname  = hostname
+        self.service   = service
+        self.pid       = pid or ""
+        self.message   = message
+        self.event_type, self.user, self.src_ip, self.port, self.detail = \
+            _classify(service, message)
 
-        month, day, time, hostname, service, pid, message = m.groups()
-        self.date_time = _parse_datetime(month, day, time, year)
-        self.hostname   = hostname
-        self.service    = service
-        self.pid        = pid or ""
-        self.message    = message
-
+    def _parse_iso(self, line: str):
+        m = _RE_ISO.match(line)
+        if not m:
+            return
+        iso_ts, hostname, service, pid, message = m.groups()
+        self.date_time = _parse_iso_datetime(iso_ts)
+        self.hostname  = hostname
+        self.service   = service
+        self.pid       = pid or ""
+        self.message   = message
         self.event_type, self.user, self.src_ip, self.port, self.detail = \
             _classify(service, message)
 
@@ -239,10 +330,24 @@ def insert_rows(conn: sqlite3.Connection, rows: list):
 
 
 # ── 파싱 ──────────────────────────────────────────────
-def parse(file_path: Path, year: int = None) -> list[AuthLogEntry]:
+def parse(file_path: Path, year: int = None,
+          file_mtime: datetime | None = None) -> list[AuthLogEntry]:
+    """
+    auth.log 파일 파싱.
+
+    Args:
+        file_path:   파싱할 파일 경로
+        year:        명시적 연도 (syslog 형식에서 사용, None 이면 file_mtime 에서 추론)
+        file_mtime:  원본 파일의 수정 시간 (압축 해제 전 원본 기준)
+                     syslog 형식에서 연도가 없을 때 이 값으로 연도 추론
+    """
+    fmt = _detect_format(file_path)
+    print(f"    [FORMAT] {fmt} 형식 감지됨")
+
     result = []
     with open(file_path, "r", encoding="utf-8", errors="replace") as f:
         for line in f:
             if line.strip():
-                result.append(AuthLogEntry(line, year=year))
+                result.append(AuthLogEntry(line, fmt=fmt, year=year,
+                                           file_mtime=file_mtime))
     return result
