@@ -20,11 +20,17 @@
       <span id="db-path" class="db-path">데이터베이스를 선택하세요</span>
     </div>
     <div class="titlebar-actions">
+      <button id="btn-global-search" class="btn btn-ghost" title="전체 검색 (Ctrl+Shift+F)">
+        🔭 전체 검색
+      </button>
       <button id="btn-open" class="btn btn-primary">
         <span>📂</span> DB 열기
       </button>
     </div>
   </header>
+
+  <!-- ── 탭 바 ── -->
+  <div class="tab-bar" id="tab-bar"></div>
 
   <!-- ── 메인 레이아웃 ── -->
   <div class="layout">
@@ -33,7 +39,7 @@
     <aside class="sidebar">
       <div id="sidebar-content" class="sidebar-content">
         <div class="sidebar-empty">
-          <p>DB를 열면 테이블 목록이<br/>표시됩니다.</p>
+          <p>DB를 열면 목록이<br/>표시됩니다.</p>
         </div>
       </div>
     </aside>
@@ -41,7 +47,7 @@
     <!-- 콘텐츠 영역 -->
     <main class="content">
 
-      <!-- 빈 화면 -->
+      <!-- 빈 화면 (DB 미선택) -->
       <div id="welcome" class="welcome">
         <div class="welcome-inner">
           <div class="welcome-icon">🛡️</div>
@@ -56,6 +62,15 @@
         </div>
       </div>
 
+      <!-- 탭 데이터 없음 화면 -->
+      <div id="tab-empty" class="tab-empty hidden">
+        <div class="tab-empty-inner">
+          <div class="tab-empty-icon">📭</div>
+          <h3 id="tab-empty-title">데이터 없음</h3>
+          <p id="tab-empty-desc">이 로그 파일이 수집되지 않았거나 파싱 데이터가 없습니다.</p>
+        </div>
+      </div>
+
       <!-- 테이블 뷰 -->
       <div id="table-view" class="table-view hidden">
 
@@ -64,6 +79,16 @@
           <div class="toolbar-left">
             <h2 id="table-title" class="table-title">—</h2>
             <span id="total-badge" class="badge">0건</span>
+
+            <!-- 날짜 범위 필터 (supertimeline 전용) -->
+            <div id="tl-date-filter" class="tl-date-filter hidden">
+              <span class="tl-df-sep"></span>
+              <span class="tl-df-icon">📅</span>
+              <input type="date" id="tl-date-from" class="tl-date-input" title="시작일" />
+              <span class="tl-df-dash">—</span>
+              <input type="date" id="tl-date-to"   class="tl-date-input" title="종료일" />
+              <button id="tl-date-clear" class="tl-date-clear-btn hidden" title="날짜 초기화">✕</button>
+            </div>
           </div>
           <div class="toolbar-right">
             <div class="search-wrap">
@@ -106,6 +131,26 @@
         <button class="modal-close" id="modal-close" title="닫기">✕</button>
       </div>
       <div class="modal-body" id="modal-body"></div>
+    </div>
+  </div>
+
+  <!-- ── 전체 검색 패널 ── -->
+  <div id="gs-panel" class="gs-panel hidden" role="dialog" aria-modal="true" aria-label="전체 검색">
+    <div class="gs-overlay" id="gs-overlay"></div>
+    <div class="gs-box">
+      <div class="gs-header">
+        <span class="gs-icon">🔍</span>
+        <input id="gs-input" class="gs-input" type="text"
+               placeholder="전체 테이블에서 검색…" autocomplete="off" spellcheck="false" />
+        <span id="gs-count-badge" class="gs-count-badge hidden"></span>
+        <button id="gs-close" class="btn-icon" title="닫기 (Esc)">✕</button>
+      </div>
+      <div id="gs-body" class="gs-body">
+        <div class="gs-hint">
+          <span class="gs-hint-icon">💡</span>
+          검색어를 입력하면 모든 분석 테이블에서 결과를 찾아드립니다.
+        </div>
+      </div>
     </div>
   </div>
 

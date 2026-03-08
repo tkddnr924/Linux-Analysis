@@ -19,9 +19,14 @@ TABLE = "log"
 
 # parser.db 에서 date_time 컬럼을 가진 로그 테이블 목록
 _LOG_TABLES = [
-    ("authlog", "authlog"),
-    ("audit",   "audit"),
-    ("nginx",   "nginx"),
+    ("authlog",     "authlog"),
+    ("audit",       "audit"),
+    ("nginx",       "nginx"),
+    ("syslog",      "syslog"),
+    ("apache2",     "apache2"),
+    ("mysql_query", "mysql_query"),
+    ("mysql_error", "mysql_error"),
+    ("kernlog",     "kernlog"),
 ]
 
 
@@ -58,10 +63,12 @@ def run(dest_conn: sqlite3.Connection, src_conn: sqlite3.Connection):
             continue
 
         # 첫/마지막 기록 일자 + 총 레코드 수
+        # MIN/MAX 에서 빈 문자열(파싱 실패 행)을 제외하기 위해 CASE WHEN 사용
+        # (SQLite 는 '' 이 모든 날짜 문자열보다 앞에 정렬되므로 MIN 이 '' 반환됨)
         row = src_conn.execute(f"""
             SELECT
-                MIN(date_time),
-                MAX(date_time),
+                MIN(CASE WHEN date_time != '' THEN date_time END),
+                MAX(CASE WHEN date_time != '' THEN date_time END),
                 COUNT(*)
             FROM {table_name}
         """).fetchone()

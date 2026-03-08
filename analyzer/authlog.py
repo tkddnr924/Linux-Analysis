@@ -8,17 +8,21 @@ analysis.db 에 아래 테이블로 저장합니다.
   authlog_sudo       : sudo 명령 실행 사용자+명령별 집계
   authlog_attack_ip  : 접근 시도 IP 전체 집계 (성공/실패 횟수 포함)
   authlog_su         : su 계정 전환 집계
+  authlog_bruteforce : SSH 무차별 대입 공격 IP별 집계
 """
 
 import sqlite3
+from datetime import datetime, timedelta
+from collections import defaultdict
 
-SRC_TABLE         = "authlog"
-TABLE_LOGIN       = "authlog_login"
-TABLE_SUDO        = "authlog_sudo"
-TABLE_ATTACK_IP   = "authlog_attack_ip"
-TABLE_SU          = "authlog_su"
+SRC_TABLE          = "authlog"
+TABLE_LOGIN        = "authlog_login"
+TABLE_SUDO         = "authlog_sudo"
+TABLE_ATTACK_IP    = "authlog_attack_ip"
+TABLE_SU           = "authlog_su"
+TABLE_BRUTEFORCE   = "authlog_bruteforce"
 
-TABLES = [TABLE_LOGIN, TABLE_SUDO, TABLE_ATTACK_IP, TABLE_SU]
+TABLES = [TABLE_LOGIN, TABLE_SUDO, TABLE_ATTACK_IP, TABLE_SU, TABLE_BRUTEFORCE]
 
 
 # ── DB ────────────────────────────────────────────────
@@ -79,6 +83,19 @@ def ensure_db(conn: sqlite3.Connection):
     conn.execute(f"CREATE INDEX IF NOT EXISTS idx_su_from ON {TABLE_SU}(from_user)")
     conn.execute(f"CREATE INDEX IF NOT EXISTS idx_su_to   ON {TABLE_SU}(to_user)")
 
+    # SSH 무차별 대입 공격 (brute force) — burst(60s/10회) 단위 저장
+    conn.execute(f"""
+    CREATE TABLE IF NOT EXISTS {TABLE_BRUTEFORCE} (
+        id             INTEGER PRIMARY KEY AUTOINCREMENT,
+        src_ip         TEXT NOT NULL,
+        burst_start    TEXT NOT NULL,
+        burst_end      TEXT NOT NULL,
+        attempt_count  INTEGER NOT NULL,
+        success_count  INTEGER NOT NULL
+    )
+    """)
+    conn.execute(f"CREATE INDEX IF NOT EXISTS idx_bf_ip ON {TABLE_BRUTEFORCE}(src_ip)")
+
     conn.commit()
 
 
@@ -119,16 +136,23 @@ def insert_all(conn: sqlite3.Connection, results: dict):
         VALUES (?,?,?,?,?)
         """, results["su"])
 
+    if results.get("bruteforce"):
+        conn.executemany(f"""
+        INSERT INTO {TABLE_BRUTEFORCE} (src_ip, burst_start, burst_end, attempt_count, success_count)
+        VALUES (?,?,?,?,?)
+        """, results["bruteforce"])
+
     conn.commit()
 
 
 # ── 분석 로직 ─────────────────────────────────────────
 def analyze(src_conn: sqlite3.Connection) -> dict[str, list]:
     return {
-        "login":     _analyze_login(src_conn),
-        "sudo":      _analyze_sudo(src_conn),
-        "attack_ip": _analyze_attack_ip(src_conn),
-        "su":        _analyze_su(src_conn),
+        "login":      _analyze_login(src_conn),
+        "sudo":       _analyze_sudo(src_conn),
+        "attack_ip":  _analyze_attack_ip(src_conn),
+        "su":         _analyze_su(src_conn),
+        "bruteforce": _analyze_bruteforce(src_conn),
     }
 
 
@@ -209,3 +233,93 @@ def _analyze_su(src_conn: sqlite3.Connection) -> list[tuple]:
         GROUP BY user, detail
         ORDER BY count DESC
     """).fetchall()
+
+
+_BURST_WINDOW        = timedelta(seconds=60)  # 슬라이딩 윈도우 크기
+_BURST_THRESHOLD     = 10                      # burst 판단 최소 시도 횟수
+_SUSTAINED_FAIL_MIN  = 50                      # sustained 판단 최소 실패 횟수
+_SUSTAINED_FAIL_RATIO = 10                     # 실패가 성공의 N배 이상이어야 함
+
+
+def _analyze_bruteforce(src_conn: sqlite3.Connection) -> list[tuple]:
+    """
+    SSH 브루트포스 탐지 — 두 가지 기준:
+      1) Burst   : 60초 이내 10회 이상 실패 (burst당 1행)
+      2) Sustained: 누적 실패 50회 이상 & 실패:성공 비율 10:1 이상 (IP당 1행)
+         → burst로 이미 탐지된 IP는 sustained 에서 제외 (중복 방지)
+    Returns: [(src_ip, burst_start, burst_end, attempt_count, success_count), ...]
+    """
+    fmt = "%Y-%m-%d %H:%M:%S"
+    fail_events    = "('sshd_failed_password', 'sshd_invalid_user')"
+    success_events = "('sshd_accepted_password', 'sshd_accepted_publickey')"
+
+    # IP별 실패 타임스탬프 수집
+    ts_by_ip: dict[str, list[datetime]] = defaultdict(list)
+    for src_ip, dt_str in src_conn.execute(f"""
+        SELECT src_ip, date_time
+        FROM {SRC_TABLE}
+        WHERE event_type IN {fail_events}
+          AND src_ip != ''
+        ORDER BY src_ip, date_time
+    """).fetchall():
+        try:
+            ts_by_ip[src_ip].append(datetime.strptime(dt_str, fmt))
+        except ValueError:
+            pass
+
+    # IP별 로그인 성공 횟수
+    success_cnt: dict[str, int] = {
+        ip: cnt for ip, cnt in src_conn.execute(f"""
+            SELECT src_ip, COUNT(*)
+            FROM {SRC_TABLE}
+            WHERE event_type IN {success_events} AND src_ip != ''
+            GROUP BY src_ip
+        """).fetchall()
+    }
+
+    # ── 1) Burst 탐지: 슬라이딩 윈도우 ───────────────────
+    bursts: list[tuple] = []
+    for ip, timestamps in ts_by_ip.items():
+        timestamps.sort()
+        i = 0
+        while i < len(timestamps):
+            win_end = timestamps[i] + _BURST_WINDOW
+            j = i + 1
+            while j < len(timestamps) and timestamps[j] <= win_end:
+                j += 1
+            count = j - i
+            if count >= _BURST_THRESHOLD:
+                bursts.append((
+                    ip,
+                    timestamps[i].strftime(fmt),      # burst_start
+                    timestamps[j - 1].strftime(fmt),  # burst_end
+                    count,
+                    success_cnt.get(ip, 0),
+                ))
+                i = j
+            else:
+                i += 1
+
+    burst_ips = {b[0] for b in bursts}   # burst로 이미 탐지된 IP 집합
+
+    # ── 2) Sustained 탐지: 누적 실패 비율 ────────────────
+    for ip, timestamps in ts_by_ip.items():
+        if ip in burst_ips:
+            continue                       # burst 이미 탐지됨 → 건너뜀
+        fail_count = len(timestamps)
+        if fail_count < _SUSTAINED_FAIL_MIN:
+            continue
+        succ_count = success_cnt.get(ip, 0)
+        if fail_count < _SUSTAINED_FAIL_RATIO * (succ_count + 1):
+            continue
+        # 누적 범위 전체를 하나의 행으로
+        bursts.append((
+            ip,
+            timestamps[0].strftime(fmt),   # 첫 실패
+            timestamps[-1].strftime(fmt),  # 마지막 실패
+            fail_count,
+            succ_count,
+        ))
+
+    bursts.sort(key=lambda r: r[1])   # burst_start 기준 시간순 정렬
+    return bursts

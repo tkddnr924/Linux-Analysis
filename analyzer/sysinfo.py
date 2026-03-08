@@ -36,6 +36,7 @@ def ensure_db(conn: sqlite3.Connection):
         id               INTEGER PRIMARY KEY AUTOINCREMENT,
         hostname         TEXT,
         internal_ip      TEXT,
+        external_ip      TEXT,
         mac_address      TEXT,
         os               TEXT,
         kernel           TEXT,
@@ -114,24 +115,62 @@ def _parse_uname(text: str) -> dict:
     return result
 
 
+def _is_private_ip(ip: str) -> bool:
+    """RFC 1918 사설 IP + CGNAT + 링크로컬 판별"""
+    parts = ip.split(".")
+    if len(parts) != 4:
+        return True
+    a, b = int(parts[0]), int(parts[1])
+    if a == 10:                          return True   # 10.0.0.0/8
+    if a == 172 and 16 <= b <= 31:       return True   # 172.16.0.0/12
+    if a == 192 and b == 168:            return True   # 192.168.0.0/16
+    if a == 100 and 64 <= b <= 127:      return True   # 100.64.0.0/10 (CGNAT)
+    if a == 169 and b == 254:            return True   # 169.254.0.0/16 (링크로컬)
+    if a == 127:                         return True   # 127.0.0.0/8
+    return False
+
+
 def _parse_ip(text: str) -> dict:
     """
-    inet 172.31.47.239/20 ... ens5
-    link/ether 0a:8d:3a:1d:74:41
+    ip_dmp 에서 모든 scope global IP 추출 후 내부/외부 분류.
+    Docker bridge (br-, docker, veth) 인터페이스는 제외.
     """
-    result = {"internal_ip": "", "mac_address": ""}
+    result = {"internal_ip": "", "external_ip": "", "mac_address": ""}
     if not text:
         return result
 
-    # 첫 번째 non-loopback inet
+    internal_ips = []
+    external_ips = []
+    current_iface = ""
+
+    # Docker/가상 브릿지 인터페이스 패턴
+    _VIRTUAL_IFACE = re.compile(r'^(br-|docker|veth|virbr)')
+
     for line in text.splitlines():
+        # 인터페이스 이름 추출: "2: enp3s0: <BROADCAST..."
+        iface_m = re.match(r'^\d+:\s+(\S+?):', line)
+        if iface_m:
+            current_iface = iface_m.group(1)
+            continue
+
         line = line.strip()
+
+        # scope global inet 만 추출
         m = re.match(r'inet ([\d.]+)/\d+.*scope global', line)
         if m:
-            result["internal_ip"] = m.group(1)
-            break
+            ip = m.group(1)
+            # Docker/가상 브릿지 인터페이스 제외
+            if _VIRTUAL_IFACE.match(current_iface):
+                continue
+            if _is_private_ip(ip):
+                internal_ips.append(ip)
+            else:
+                external_ips.append(ip)
 
-    # MAC
+    result["internal_ip"] = ", ".join(internal_ips) if internal_ips else ""
+    result["external_ip"] = ", ".join(external_ips) if external_ips else ""
+
+    # MAC (첫 번째 물리 인터페이스)
     m = re.search(r'link/ether ([\da-f:]+)', text)
     if m:
         result["mac_address"] = m.group(1)
@@ -303,6 +342,7 @@ def run(conn: sqlite3.Connection):
     print(f"[SYSINFO] 저장 완료")
     print(f"  호스트명    : {row.get('hostname')}")
     print(f"  내부 IP     : {row.get('internal_ip')}")
+    print(f"  외부 IP     : {row.get('external_ip') or '(없음 / NAT 환경)'}")
     print(f"  OS          : {row.get('os')}  커널: {row.get('kernel')}")
     print(f"  CPU         : {row.get('cpu_model')} ({row.get('cpu_cores')}core)")
     print(f"  디스크      : {row.get('disk_used')}/{row.get('disk_total')} ({row.get('disk_use_pct')})")

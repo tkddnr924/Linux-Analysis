@@ -4,7 +4,7 @@
 __pycache__
 .DS_Store
 *.bak
-target/
+*target*/
 .claude
 
 # PyInstaller 빌드 결과물
