@@ -9,7 +9,8 @@ analysis.db 에 아래 테이블로 저장합니다.
   apache2_webshell  : 웹쉘 의심 파일 + 접근 행위 분석
 
 탐지 패턴 (URI 이중 URL 디코딩 적용):
-  - sql_injection   : UNION SELECT, ' OR 1=1, stacked query 등
+  - sql_injection   : UNION SELECT + 컬럼 추출, 시스템 메타정보(information_schema/@@version/user() 등),
+                      DML(INSERT/UPDATE/DELETE), DDL(DROP/TRUNCATE), 파일 I/O, 코드 실행, 블라인드(SLEEP/BENCHMARK) 등
   - xss             : <script>, onerror=, javascript: 등
   - path_traversal  : ../ 경로 탈출 + /etc/passwd 접근 시도
   - lfi_rfi         : php://, file://, expect://, /proc/self/environ 등
@@ -38,7 +39,7 @@ TABLE_TOP_IP   = "apache2_top_ip"
 TABLE_ATTACK   = "apache2_attack"
 TABLE_WEBSHELL = "apache2_webshell"
 
-TABLES = [TABLE_TOP_IP, TABLE_ATTACK, TABLE_WEBSHELL]
+TABLES = [TABLE_TOP_IP, TABLE_ATTACK, TABLE_WEBSHELL, "apache2_error"]
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -114,15 +115,34 @@ _ATTACK_PATTERNS: list[tuple[str, re.Pattern]] = [
         re.I
     )),
 
+    # ── SQL Injection ─────────────────────────────────────────────────────────
     ("sql_injection", re.compile(
-        r"\bunion\b.{0,30}\bselect\b"
-        r"|'\s*(?:or|and)\s+['\d]"
-        r"|--(?:\s|$|\+)"
-        r"|;?\s*(?:drop|truncate|delete)\s+(?:table|from|database)"
+        # UNION SELECT 기반 데이터 추출 (컬럼/테이블 조회 징후 필요)
+        r"\bunion\b.{0,50}\bselect\b.{0,60}\b(?:from|null|0x|char\(|concat\()"
+        # 시스템 메타데이터 조회 — DB 구조·계정 정보 탈취
+        r"|\bfrom\s+information_schema\b"
+        r"|\bfrom\s+(?:pg_catalog|pg_tables|pg_user|sqlite_master|sys\.tables|sysobjects)\b"
+        r"|@@(?:version|datadir|hostname|global\.|session\.)"
+        r"|\b(?:user|database|schema|version)\s*\(\s*\)"
+        # DML — 데이터 직접 삽입·수정·삭제
+        r"|\binsert\s+into\b.{0,80}\bvalues\s*\("
+        r"|\bupdate\b.{0,60}\bset\b.{0,60}="
+        r"|\bdelete\s+from\b"
+        # DDL — 테이블·DB 구조 파괴
+        r"|\bdrop\s+(?:table|database|schema|index|view|procedure|function)\b"
+        r"|\btruncate\s+(?:table\s+)?\w"
+        # 파일 I/O
+        r"|\bload_file\s*\("
+        r"|\binto\s+(?:outfile|dumpfile)\b"
+        # 코드 실행 (MSSQL 중심)
+        r"|\bexec(?:ute)?\s*\("
+        r"|\bxp_cmdshell\b"
+        r"|\bsp_executesql\b"
+        # 블라인드 SQLi — 시간 지연 (공격 의도 명확)
         r"|\bsleep\s*\(\s*\d"
         r"|\bwaitfor\s+delay\b"
-        r"|\bload_file\s*\("
-        r"|\binto\s+(?:outfile|dumpfile)\b",
+        r"|\bbenchmark\s*\(\s*\d"
+        r"|\bpg_sleep\s*\(\s*\d",
         re.I
     )),
 
@@ -297,6 +317,8 @@ def ensure_db(conn: sqlite3.Connection):
     conn.execute(f"CREATE INDEX IF NOT EXISTS idx_apache2_ws_score ON {TABLE_WEBSHELL}(suspicion_score DESC)")
 
     conn.commit()
+    # 에러 로그 테이블 (lazy: 함수 정의는 파일 하단에 있음)
+    _ensure_error_table(conn)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -326,6 +348,13 @@ def insert_all(conn: sqlite3.Connection, results: dict):
         VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
         """, results["webshell"])
 
+    if results.get("error"):
+        conn.executemany(f"""
+        INSERT INTO {TABLE_ERROR}
+            (date_time, level, module, client_ip, error_type, message)
+        VALUES (?,?,?,?,?,?)
+        """, results["error"])
+
     conn.commit()
 
 
@@ -335,10 +364,12 @@ def insert_all(conn: sqlite3.Connection, results: dict):
 def analyze(src_conn: sqlite3.Connection) -> dict[str, list]:
     attack   = _analyze_attack(src_conn)
     webshell = _analyze_webshell(src_conn)
+    error    = _analyze_error(src_conn)
     return {
         "top_ip":   _analyze_top_ip(attack),
         "attack":   attack,
         "webshell": webshell,
+        "error":    error,
     }
 
 
@@ -448,4 +479,127 @@ def _analyze_webshell(src_conn: sqlite3.Connection) -> list[tuple]:
         ))
 
     results.sort(key=lambda r: (-r[10], -r[6]))
+    return results
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 에러 로그 분석 (apache2_error parser 테이블 → analysis.db apache2_error 테이블)
+# ──────────────────────────────────────────────────────────────────────────────
+
+SRC_ERROR_TABLE = "apache2_error"
+TABLE_ERROR     = "apache2_error"
+
+# 에러 메시지 분류 패턴 (순서가 곧 우선순위)
+_ERROR_CLASSIFY: list[tuple[str, re.Pattern]] = [
+    ("attack", re.compile(
+        r"(?:\.\.[\\/]){1,}"                   # path traversal
+        r"|(?:%2e%2e|%252e%252e)"
+        r"|\beval\s*\("                         # code injection
+        r"|\bbase64_decode\s*\("
+        r"|union\b.{0,30}\bselect\b"            # SQLi
+        r"|\$\{.*?jndi"                         # Log4Shell
+        r"|/etc/(?:passwd|shadow)"
+        r"|/bin/(?:sh|bash)\b"
+        r"|cmd\.exe",
+        re.I
+    )),
+    ("php_error", re.compile(
+        r"(?:PHP\s+(?:Fatal|Parse|Warning|Notice|Deprecated|Strict)\s+error)"
+        r"|(?:Uncaught\s+(?:Error|Exception|TypeError))",
+        re.I
+    )),
+    ("file_not_found", re.compile(
+        r"(?:File does not exist|No such file or directory|script not found"
+        r"|does not exist in the file system|Symbolic link not allowed)",
+        re.I
+    )),
+    ("permission_denied", re.compile(
+        r"(?:Permission denied|access denied|Forbidden|client denied"
+        r"|directory index forbidden)",
+        re.I
+    )),
+    ("ssl_tls", re.compile(
+        r"(?:SSL|TLS|certificate|handshake|cipher|SNI)",
+        re.I
+    )),
+    ("auth_failure", re.compile(
+        r"(?:user .+ authentication failure"
+        r"|invalid password|password mismatch"
+        r"|failed login|login failed)",
+        re.I
+    )),
+]
+
+
+def _classify_error(module: str, message: str) -> str:
+    for label, rx in _ERROR_CLASSIFY:
+        if rx.search(message):
+            return label
+    # 모듈 기반 폴백
+    mod_lower = module.lower()
+    if mod_lower.startswith("php"):
+        return "php_error"
+    if mod_lower in ("ssl", "socache_shmcb"):
+        return "ssl_tls"
+    return "other"
+
+
+def _ensure_error_table(conn: sqlite3.Connection):
+    conn.execute(f"""
+    CREATE TABLE IF NOT EXISTS {TABLE_ERROR} (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        date_time   TEXT,
+        level       TEXT,
+        module      TEXT,
+        client_ip   TEXT,
+        error_type  TEXT,
+        message     TEXT
+    )
+    """)
+    conn.execute(f"CREATE INDEX IF NOT EXISTS idx_a2err_dt   ON {TABLE_ERROR}(date_time)")
+    conn.execute(f"CREATE INDEX IF NOT EXISTS idx_a2err_ip   ON {TABLE_ERROR}(client_ip)")
+    conn.execute(f"CREATE INDEX IF NOT EXISTS idx_a2err_type ON {TABLE_ERROR}(error_type)")
+    conn.execute(f"CREATE INDEX IF NOT EXISTS idx_a2err_lvl  ON {TABLE_ERROR}(level)")
+    conn.commit()
+
+
+def _analyze_error(src_conn: sqlite3.Connection) -> list[tuple]:
+    """
+    parser.db apache2_error → 분류된 에러 이벤트 목록 반환.
+    비슷한 연속 메시지는 dedup (동일 client_ip + error_type + message[:60]).
+    """
+    cur = src_conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+        (SRC_ERROR_TABLE,)
+    )
+    if not cur.fetchone():
+        return []
+
+    rows = src_conn.execute(f"""
+        SELECT date_time, level, module, client_ip, message
+        FROM   {SRC_ERROR_TABLE}
+        ORDER  BY date_time
+    """).fetchall()
+
+    seen: set[tuple] = set()
+    results: list[tuple] = []
+
+    for date_time, level, module, client_ip, message in rows:
+        error_type = _classify_error(module or "", message or "")
+        dedup_key  = (client_ip or "", error_type, (message or "")[:60])
+
+        # 공격·PHP 에러는 전부 기록, 나머지는 dedup
+        if error_type not in ("attack", "php_error") and dedup_key in seen:
+            continue
+        seen.add(dedup_key)
+
+        results.append((
+            date_time,
+            level,
+            module,
+            client_ip or "",
+            error_type,
+            (message or "")[:300],
+        ))
+
     return results

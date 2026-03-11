@@ -31,13 +31,17 @@ TABLE_QUERY = "mysql_query"
 TABLE_ERROR = "mysql_error"
 
 # ── 날짜 파싱 ──────────────────────────────────────────
-_DT_RE = re.compile(r'^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2})')
+_DT_RE = re.compile(r'^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2})(?:\.(\d+))?')
 
 
 def _parse_datetime(raw: str) -> str:
-    """2026-03-04T15:00:02.239449Z → 2026-03-04 15:00:02"""
+    """2026-03-04T15:00:02.239449Z → 2026-03-04 15:00:02.239  (ms 3자리 보존)"""
     m = _DT_RE.match(raw)
-    return f"{m.group(1)} {m.group(2)}" if m else raw
+    if not m:
+        return raw
+    date, time, frac = m.group(1), m.group(2), m.group(3)
+    ms = (frac + '000')[:3] if frac else '000'
+    return f"{date} {time}.{ms}"
 
 
 # ── DB ────────────────────────────────────────────────

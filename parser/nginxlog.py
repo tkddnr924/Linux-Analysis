@@ -27,12 +27,13 @@ _MONTHS = {
 }
 
 def _parse_datetime(raw: str) -> str:
-    """02/Mar/2026:00:01:57 +0000 → 2026-03-02 00:01:57"""
+    """02/Mar/2026:00:01:57 +0000 → 2026-03-02 00:01:57.000
+    CLF 형식에는 밀리초가 없으므로 .000 을 붙인다."""
     m = re.match(r'(\d{2})/(\w{3})/(\d{4}):(\d{2}:\d{2}:\d{2})', raw)
     if not m:
         return raw
     day, mon, year, time = m.groups()
-    return f"{year}-{_MONTHS.get(mon, '00')}-{day} {time}"
+    return f"{year}-{_MONTHS.get(mon, '00')}-{day} {time}.000"
 
 
 # ── 로그 라인 파싱 ─────────────────────────────────────

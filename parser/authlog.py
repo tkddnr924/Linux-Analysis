@@ -33,22 +33,29 @@ _MONTHS = {
 
 
 def _parse_syslog_datetime(month: str, day: str, time: str, year: int) -> str:
-    """'Mar  1 00:07:35' + year → 'YYYY-MM-DD HH:MM:SS'"""
+    """'Mar  1 00:07:35' + year → 'YYYY-MM-DD HH:MM:SS.000'
+    Syslog (BSD) 형식에는 밀리초가 없으므로 .000 을 붙인다."""
     m = _MONTHS.get(month, 1)
     d = int(day.strip())
-    return f"{year}-{m:02d}-{d:02d} {time}"
+    return f"{year}-{m:02d}-{d:02d} {time}.000"
 
 
 def _parse_iso_datetime(iso_str: str) -> str:
-    """'2024-01-15T00:07:35.123456+09:00' → '2024-01-15 00:07:35'"""
-    # T 기준으로 날짜/시간 분리
+    """'2024-01-15T00:07:35.123456+09:00' → '2024-01-15 00:07:35.123'
+    밀리초(3자리)까지 보존한다."""
     if "T" in iso_str:
         date_part, rest = iso_str.split("T", 1)
-        # 소수점 이하, 타임존 제거 → HH:MM:SS 만 추출
-        time_part = rest[:8]  # HH:MM:SS
-        return f"{date_part} {time_part}"
-    # T 없이 공백으로 구분된 경우 (YYYY-MM-DD HH:MM:SS)
-    return iso_str[:19]
+        time_hms = rest[:8]             # HH:MM:SS
+        if len(rest) > 8 and rest[8] == '.':
+            # 소수 부분에서 처음 3자리만 취해 ms 로 사용
+            ms = (rest[9:12] + '000')[:3]
+        else:
+            ms = '000'
+        return f"{date_part} {time_hms}.{ms}"
+    # T 없이 공백으로 구분된 경우 (YYYY-MM-DD HH:MM:SS[.mmm])
+    base = iso_str[:19]
+    ms   = (iso_str[20:23] + '000')[:3] if len(iso_str) > 19 and iso_str[19] == '.' else '000'
+    return f"{base}.{ms}"
 
 
 def _infer_year(file_mtime: datetime | None, month: int) -> int:

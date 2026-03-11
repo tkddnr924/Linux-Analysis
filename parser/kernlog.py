@@ -23,10 +23,18 @@ _RE_ISO = re.compile(
 
 
 def _parse_iso_datetime(iso_str: str) -> str:
+    """ISO 8601 → 'YYYY-MM-DD HH:MM:SS.mmm' (밀리초 3자리 보존)."""
     if "T" in iso_str:
         date_part, rest = iso_str.split("T", 1)
-        return f"{date_part} {rest[:8]}"
-    return iso_str[:19]
+        time_hms = rest[:8]
+        if len(rest) > 8 and rest[8] == '.':
+            ms = (rest[9:12] + '000')[:3]
+        else:
+            ms = '000'
+        return f"{date_part} {time_hms}.{ms}"
+    base = iso_str[:19]
+    ms   = (iso_str[20:23] + '000')[:3] if len(iso_str) > 19 and iso_str[19] == '.' else '000'
+    return f"{base}.{ms}"
 
 
 # ── 데이터 클래스 ─────────────────────────────────────

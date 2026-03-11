@@ -60,26 +60,35 @@ ANALYSIS_DB  = Path("analysis.db")
 DECOMP_DIR   = Path(".decomp")   # 압축 해제 임시 디렉토리
 
 LOG_TARGETS = [
-    {"name": "audit",   "glob": auditlog.AUDIT_LOG_GLOB,    "module": auditlog},
-    {"name": "authlog", "glob": authlog.AUTH_LOG_GLOB,      "module": authlog},
-    # nginx / apache2 : access.log* glob 충돌 방지 → 각각 전용 디렉토리로 검색 범위 한정
-    {"name": "nginx",   "glob": nginxlog.NGINX_LOG_GLOB,    "module": nginxlog,
-     "search_dir": TARGET_DIR / "NonVolatile/var/log/nginx"},
-    {"name": "syslog",  "glob": syslogmod.SYSLOG_LOG_GLOB,  "module": syslogmod},
-    {"name": "apache2", "glob": apache2log.APACHE2_LOG_GLOB, "module": apache2log,
-     "search_dir": TARGET_DIR / "NonVolatile/var/log/apache2"},
-    # mysql: query.log / error.log 를 각각 파싱 (parse_fn/to_row_fn/insert_fn 으로 분기)
+    {"name": "audit",   "glob": auditlog.AUDIT_LOG_GLOB,   "module": auditlog},
+    {"name": "authlog", "glob": authlog.AUTH_LOG_GLOB,     "module": authlog},
+    # nginx: access.log* glob 충돌 방지 → nginx 디렉토리만 탐색
+    # find_log_dir 로 NonVolatile/var/log/ 없어도 자동 탐색
+    {"name": "nginx",   "glob": nginxlog.NGINX_LOG_GLOB,   "module": nginxlog,
+     "search_dir": lambda: find_log_dir("nginx")},
+    {"name": "syslog",  "glob": syslogmod.SYSLOG_LOG_GLOB, "module": syslogmod},
+    # apache2 접근 로그: .log / _log 변형 모두 처리, 디렉토리 동적 탐색
+    {"name": "apache2", "globs": apache2log.APACHE2_ACCESS_GLOBS, "module": apache2log,
+     "search_dir": lambda: find_log_dir("apache2")},
+    # apache2 에러 로그: error.log / error_log 변형 모두 처리
+    {"name": "apache2_error", "globs": apache2log.APACHE2_ERROR_GLOBS, "module": apache2log,
+     "parse_fn":      apache2log.parse_error,
+     "to_row_fn":     apache2log.to_row_error,
+     "insert_fn":     apache2log.insert_rows_error,
+     "ensure_db_fn":  apache2log.ensure_db_error,
+     "search_dir":    lambda: find_log_dir("apache2")},
+    # mysql: query.log / error.log 를 각각 파싱
     {"name": "mysql_query", "glob": mysqllog.MYSQL_QUERY_GLOB, "module": mysqllog,
      "parse_fn": mysqllog.parse_query, "to_row_fn": mysqllog.to_row_query,
      "insert_fn": mysqllog.insert_rows_query,
-     "search_dir": TARGET_DIR / "NonVolatile/var/log/mysql"},
+     "search_dir": lambda: find_log_dir("mysql")},
     {"name": "mysql_error", "glob": mysqllog.MYSQL_ERROR_GLOB, "module": mysqllog,
      "parse_fn": mysqllog.parse_error, "to_row_fn": mysqllog.to_row_error,
      "insert_fn": mysqllog.insert_rows_error,
-     "search_dir": TARGET_DIR / "NonVolatile/var/log/mysql"},
+     "search_dir": lambda: find_log_dir("mysql")},
     # kern.log: syslog 와 같은 디렉토리, UFW 제외한 커널 이벤트
-    {"name": "kernlog",  "glob": kernlogmod.KERN_LOG_GLOB, "module": kernlogmod,
-     "search_dir": TARGET_DIR / "NonVolatile/var/log"},
+    {"name": "kernlog", "glob": kernlogmod.KERN_LOG_GLOB, "module": kernlogmod,
+     "search_dir": lambda: find_log_dir("log") or TARGET_DIR / "NonVolatile/var/log"},
 ]
 
 ANALYZERS = [
@@ -133,14 +142,39 @@ def insert_info(conn: sqlite3.Connection, file_path: Path, checksum: str, log_ty
 
 
 # ── 유틸 ──────────────────────────────────────────────
-def find_files(base: Path, glob: str) -> list[Path]:
-    """glob 패턴으로 파일 탐색 (압축 파일 포함 .gz 변형도 탐색)"""
-    if not base.exists() or not base.is_dir():
+def find_files(base: Path | None, globs: str | list[str]) -> list[Path]:
+    """
+    glob 패턴(단일 str 또는 list[str])으로 파일 탐색.
+    .gz 압축본도 자동 포함. base 가 None 이거나 존재하지 않으면 빈 리스트 반환.
+    """
+    if isinstance(globs, str):
+        globs = [globs]
+    if not base or not base.exists() or not base.is_dir():
         return []
-    files = sorted(base.rglob(glob))
-    # .gz 압축본도 탐색: auth.log.2.gz 등
-    files += sorted(f for f in base.rglob(glob + ".gz") if f not in files)
-    return files
+    seen: set[Path] = set()
+    result: list[Path] = []
+    for glob in globs:
+        for f in sorted(base.rglob(glob)):
+            if f.is_file() and f not in seen:
+                seen.add(f); result.append(f)
+        # .gz 압축본: auth.log.2.gz 등
+        for f in sorted(base.rglob(glob + ".gz")):
+            if f.is_file() and f not in seen:
+                seen.add(f); result.append(f)
+    return result
+
+
+def find_log_dir(dirname: str) -> Path | None:
+    """
+    target/ 하위 어디서든 dirname 이름의 디렉토리를 탐색하여 반환.
+    NonVolatile/var/log/ 접두사가 없어도 발견 가능.
+    예: find_log_dir("apache2") → target/NonVolatile/var/log/apache2
+                                또는 target/apache2 등
+    """
+    for d in sorted(TARGET_DIR.rglob(dirname)):
+        if d.is_dir():
+            return d
+    return None
 
 
 def reset_analysis_db():
@@ -160,12 +194,17 @@ def cleanup_decomp():
 def scan(base: Path) -> dict:
     found = {}
     for target in LOG_TARGETS:
-        search_base = target.get("search_dir", base)
-        files = find_files(search_base, target["glob"])
+        sd = target.get("search_dir", base)
+        # callable → 실행 시점에 경로 결정 (find_log_dir 람다)
+        if callable(sd):
+            sd = sd()
+        search_base = sd if sd is not None else base
+        globs = target.get("globs") or target.get("glob", "")
+        files = find_files(search_base, globs)
         found[target["name"]] = {
             "files":  files,
             "module": target["module"],
-            "target": target,   # parse_fn / to_row_fn / insert_fn 오버라이드 포함
+            "target": target,   # parse_fn / to_row_fn / insert_fn / ensure_db_fn 오버라이드 포함
         }
     return found
 
@@ -223,7 +262,9 @@ def _resolve_file(f: Path) -> tuple[Path, bool]:
 def _process_parse(conn: sqlite3.Connection, name: str, files: list[Path], mod,
                    target: dict | None = None):
     print(f"\n[{name.upper()}] {len(files)}개 파일 확인 중...")
-    mod.ensure_db(conn)
+    # ensure_db_fn 오버라이드: 동일 모듈의 서브 파서(apache2_error 등)에서 사용
+    ensure_db_fn = target.get("ensure_db_fn", mod.ensure_db) if target else mod.ensure_db
+    ensure_db_fn(conn)
 
     # parse_fn / to_row_fn / insert_fn 은 LOG_TARGET 에서 오버라이드 가능
     # (mysql_query / mysql_error 처럼 동일 모듈에서 다른 함수 사용 시)
@@ -321,7 +362,8 @@ def analyze_logs():
             "cron":    [("info", "cron_info")],
             "nginx":   [("top_ip", "nginx_top_ip"), ("attack", "nginx_attack"), ("webshell", "nginx_webshell")],
             "syslog":  [("cron", "syslog_cron"), ("ufw", "syslog_ufw"), ("service", "syslog_service")],
-            "apache2": [("top_ip", "apache2_top_ip"), ("attack", "apache2_attack"), ("webshell", "apache2_webshell")],
+            "apache2": [("top_ip", "apache2_top_ip"), ("attack", "apache2_attack"),
+                        ("webshell", "apache2_webshell"), ("error", "apache2_error")],
             "mysql":   [("sqli", "mysql_sqli")],
             "kernlog": [("apparmor", "kernlog_apparmor"), ("boot", "kernlog_boot")],
         }

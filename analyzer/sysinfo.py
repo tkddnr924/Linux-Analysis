@@ -218,18 +218,19 @@ def _parse_timezone(text: str) -> str:
 
 
 def _parse_collected_at(text: str) -> str:
-    """Mon Mar  2 16:01:37 UTC 2026 → 2026-03-02 16:01:37"""
+    """Mon Mar  2 16:01:37 UTC 2026 → 2026-03-02 16:01:37.000
+    date 명령 출력에는 ms가 없으므로 .000 을 붙인다."""
     if not text:
         return ""
     try:
         dt = datetime.strptime(text, "%a %b %d %H:%M:%S %Z %Y")
-        return dt.strftime("%Y-%m-%d %H:%M:%S")
+        return dt.strftime("%Y-%m-%d %H:%M:%S.000")
     except ValueError:
         # 공백 두 칸 처리
         text = re.sub(r'\s+', ' ', text)
         try:
             dt = datetime.strptime(text, "%a %b %d %H:%M:%S %Z %Y")
-            return dt.strftime("%Y-%m-%d %H:%M:%S")
+            return dt.strftime("%Y-%m-%d %H:%M:%S.000")
         except ValueError:
             return text
 
@@ -252,9 +253,17 @@ def _parse_uptime(uptime_text: str, collected_at: str) -> dict:
 
         if collected_at:
             try:
-                col_dt  = datetime.strptime(collected_at, "%Y-%m-%d %H:%M:%S")
+                # ms 포함 형식 (.000) 허용
+                for _fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S"):
+                    try:
+                        col_dt = datetime.strptime(collected_at, _fmt)
+                        break
+                    except ValueError:
+                        continue
+                else:
+                    raise ValueError
                 boot_dt = col_dt - timedelta(days=days, hours=hours, minutes=mins)
-                result["booted_at"] = boot_dt.strftime("%Y-%m-%d %H:%M:%S")
+                result["booted_at"] = boot_dt.strftime("%Y-%m-%d %H:%M:%S.000")
             except ValueError:
                 pass
 
@@ -323,7 +332,7 @@ def analyze() -> dict:
         **_parse_last(_read(_NONVOLATILE / "last_dmp")),
         "listen_ports": _parse_listen_ports(_read(_VOLATILE / "session_dmp")),
         "collect_user": _read(_NONVOLATILE / "whoami_dmp"),
-        "analyzed_at":  datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "analyzed_at":  (lambda n: n.strftime("%Y-%m-%d %H:%M:%S.") + f"{n.microsecond // 1000:03d}")(datetime.now()),
     }
 
     return row

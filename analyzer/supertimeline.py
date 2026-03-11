@@ -34,13 +34,28 @@ TABLE = "supertimeline"
 _KST_DELTA = timedelta(hours=9)
 
 
+def _parse_dt_flex(dt_str: str) -> datetime:
+    """'YYYY-MM-DD HH:MM:SS[.mmm]' → datetime (ms suffix 허용)"""
+    for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S"):
+        try:
+            return datetime.strptime(dt_str, fmt)
+        except ValueError:
+            pass
+    raise ValueError(f"Cannot parse datetime: {dt_str!r}")
+
+
+def _fmt_ms(dt: datetime) -> str:
+    """datetime → 'YYYY-MM-DD HH:MM:SS.mmm'"""
+    return dt.strftime("%Y-%m-%d %H:%M:%S.") + f"{dt.microsecond // 1000:03d}"
+
+
 def _to_kst(dt_str: str) -> str:
-    """UTC 문자열 → KST (+9h) 변환. 실패 시 원본 반환."""
+    """UTC 문자열 → KST (+9h) 변환. ms 포함 형식 허용. 실패 시 원본 반환."""
     if not dt_str:
         return dt_str
     try:
-        dt = datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S")
-        return (dt + _KST_DELTA).strftime("%Y-%m-%d %H:%M:%S")
+        dt = _parse_dt_flex(dt_str)
+        return _fmt_ms(dt + _KST_DELTA)
     except ValueError:
         return dt_str
 
@@ -86,13 +101,12 @@ def _collect_bruteforce(conn: sqlite3.Connection) -> list[tuple]:
         ORDER BY burst_start
     """).fetchall()
 
-    fmt = "%Y-%m-%d %H:%M:%S"
     out = []
     for burst_start, burst_end, src_ip, attempt, success in rows:
-        # burst vs sustained 구분 (지속 시간으로 판단)
+        # burst vs sustained 구분 (지속 시간으로 판단, ms 포함 형식 허용)
         try:
-            t0 = datetime.strptime(burst_start, fmt)
-            t1 = datetime.strptime(burst_end, fmt)
+            t0 = _parse_dt_flex(burst_start)
+            t1 = _parse_dt_flex(burst_end)
             dur_s = (t1 - t0).total_seconds()
         except ValueError:
             dur_s = 0

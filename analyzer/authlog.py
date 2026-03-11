@@ -240,6 +240,24 @@ _BURST_THRESHOLD     = 10                      # burst 판단 최소 시도 횟�
 _SUSTAINED_FAIL_MIN  = 50                      # sustained 판단 최소 실패 횟수
 _SUSTAINED_FAIL_RATIO = 10                     # 실패가 성공의 N배 이상이어야 함
 
+# ── ms 대응 datetime 유틸 ─────────────────────────────
+_DT_FMTS = ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S")
+
+
+def _parse_dt(s: str) -> datetime:
+    """'YYYY-MM-DD HH:MM:SS[.mmm]' → datetime (ms suffix 허용)"""
+    for fmt in _DT_FMTS:
+        try:
+            return datetime.strptime(s, fmt)
+        except ValueError:
+            pass
+    raise ValueError(f"Cannot parse datetime: {s!r}")
+
+
+def _fmt_dt(dt: datetime) -> str:
+    """datetime → 'YYYY-MM-DD HH:MM:SS.mmm' (3자리 ms)"""
+    return dt.strftime("%Y-%m-%d %H:%M:%S.") + f"{dt.microsecond // 1000:03d}"
+
 
 def _analyze_bruteforce(src_conn: sqlite3.Connection) -> list[tuple]:
     """
@@ -249,7 +267,6 @@ def _analyze_bruteforce(src_conn: sqlite3.Connection) -> list[tuple]:
          → burst로 이미 탐지된 IP는 sustained 에서 제외 (중복 방지)
     Returns: [(src_ip, burst_start, burst_end, attempt_count, success_count), ...]
     """
-    fmt = "%Y-%m-%d %H:%M:%S"
     fail_events    = "('sshd_failed_password', 'sshd_invalid_user')"
     success_events = "('sshd_accepted_password', 'sshd_accepted_publickey')"
 
@@ -263,7 +280,7 @@ def _analyze_bruteforce(src_conn: sqlite3.Connection) -> list[tuple]:
         ORDER BY src_ip, date_time
     """).fetchall():
         try:
-            ts_by_ip[src_ip].append(datetime.strptime(dt_str, fmt))
+            ts_by_ip[src_ip].append(_parse_dt(dt_str))
         except ValueError:
             pass
 
@@ -291,8 +308,8 @@ def _analyze_bruteforce(src_conn: sqlite3.Connection) -> list[tuple]:
             if count >= _BURST_THRESHOLD:
                 bursts.append((
                     ip,
-                    timestamps[i].strftime(fmt),      # burst_start
-                    timestamps[j - 1].strftime(fmt),  # burst_end
+                    _fmt_dt(timestamps[i]),      # burst_start (ms 보존)
+                    _fmt_dt(timestamps[j - 1]),  # burst_end   (ms 보존)
                     count,
                     success_cnt.get(ip, 0),
                 ))
@@ -315,8 +332,8 @@ def _analyze_bruteforce(src_conn: sqlite3.Connection) -> list[tuple]:
         # 누적 범위 전체를 하나의 행으로
         bursts.append((
             ip,
-            timestamps[0].strftime(fmt),   # 첫 실패
-            timestamps[-1].strftime(fmt),  # 마지막 실패
+            _fmt_dt(timestamps[0]),    # 첫 실패 (ms 보존)
+            _fmt_dt(timestamps[-1]),   # 마지막 실패 (ms 보존)
             fail_count,
             succ_count,
         ))

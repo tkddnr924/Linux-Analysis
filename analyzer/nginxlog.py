@@ -9,7 +9,8 @@ analysis.db 에 아래 테이블로 저장합니다.
   nginx_webshell  : 웹쉘 의심 파일 + 접근 행위 분석
 
 탐지 패턴 (URI 이중 URL 디코딩 적용):
-  - sql_injection   : UNION SELECT, ' OR 1=1, stacked query 등
+  - sql_injection   : UNION SELECT + 컬럼 추출, 시스템 메타정보(information_schema/@@version/user() 등),
+                      DML(INSERT/UPDATE/DELETE), DDL(DROP/TRUNCATE), 파일 I/O, 코드 실행, 블라인드(SLEEP/BENCHMARK) 등
   - xss             : <script>, onerror=, javascript: 등
   - path_traversal  : ../ 경로 탈출 + /etc/passwd 접근 시도
   - lfi_rfi         : php://, file://, expect://, /proc/self/environ 등
@@ -126,17 +127,37 @@ _ATTACK_PATTERNS: list[tuple[str, re.Pattern]] = [
     )),
 
     # ── SQL Injection ─────────────────────────────────────────────────────────
+    # ── SQL Injection ─────────────────────────────────────────────────────────
     ("sql_injection", re.compile(
-        r'\bunion\b.{0,30}\bselect\b'
-        r"|'\s*(?:or|and)\s+['\d]"
-        r'|--(?:\s|$|\+)'
-        r'|;?\s*(?:drop|truncate|delete)\s+(?:table|from|database)'
-        r'|\bsleep\s*\(\s*\d'
-        r'|\bwaitfor\s+delay\b'
-        r'|\bload_file\s*\('
-        r'|\binto\s+(?:outfile|dumpfile)\b',
+        # UNION SELECT 기반 데이터 추출 (컬럼/테이블 조회 징후 필요)
+        r"\bunion\b.{0,50}\bselect\b.{0,60}\b(?:from|null|0x|char\(|concat\()"
+        # 시스템 메타데이터 조회 — DB 구조·계정 정보 탈취
+        r"|\bfrom\s+information_schema\b"
+        r"|\bfrom\s+(?:pg_catalog|pg_tables|pg_user|sqlite_master|sys\.tables|sysobjects)\b"
+        r"|@@(?:version|datadir|hostname|global\.|session\.)"
+        r"|\b(?:user|database|schema|version)\s*\(\s*\)"
+        # DML — 데이터 직접 삽입·수정·삭제
+        r"|\binsert\s+into\b.{0,80}\bvalues\s*\("
+        r"|\bupdate\b.{0,60}\bset\b.{0,60}="
+        r"|\bdelete\s+from\b"
+        # DDL — 테이블·DB 구조 파괴
+        r"|\bdrop\s+(?:table|database|schema|index|view|procedure|function)\b"
+        r"|\btruncate\s+(?:table\s+)?\w"
+        # 파일 I/O
+        r"|\bload_file\s*\("
+        r"|\binto\s+(?:outfile|dumpfile)\b"
+        # 코드 실행 (MSSQL 중심)
+        r"|\bexec(?:ute)?\s*\("
+        r"|\bxp_cmdshell\b"
+        r"|\bsp_executesql\b"
+        # 블라인드 SQLi — 시간 지연 (공격 의도 명확)
+        r"|\bsleep\s*\(\s*\d"
+        r"|\bwaitfor\s+delay\b"
+        r"|\bbenchmark\s*\(\s*\d"
+        r"|\bpg_sleep\s*\(\s*\d",
         re.I
     )),
+
 
     # ── XSS ──────────────────────────────────────────────────────────────────
     ("xss", re.compile(

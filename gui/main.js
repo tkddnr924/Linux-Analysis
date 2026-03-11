@@ -124,8 +124,8 @@ ipcMain.handle('db:getTables', () => {
   }
 })
 
-// ── IPC: 테이블 데이터 (페이지네이션 + 검색 + 정렬 + 날짜 범위) ─
-ipcMain.handle('db:getTableData', (_e, { table, search, limit, offset, sortCol, sortDir, dateFrom, dateTo }) => {
+// ── IPC: 테이블 데이터 (페이지네이션 + 검색 + 정렬 + 날짜 범위 + 컬럼 필터) ─
+ipcMain.handle('db:getTableData', (_e, { table, search, limit, offset, sortCol, sortDir, dateFrom, dateTo, colFilters }) => {
   if (!db) return { rows: [], total: 0, columns: [] }
   try {
     const cols = db.prepare(`PRAGMA table_info("${table}")`).all().map(r => r.name)
@@ -143,7 +143,16 @@ ipcMain.handle('db:getTableData', (_e, { table, search, limit, offset, sortCol, 
     }
     if (dateTo) {
       conditions.push('"date_time" <= ?')
-      params.push(dateTo + ' 23:59:59')
+      params.push(dateTo + ' 23:59:59.999')
+    }
+    // 컬럼별 개별 필터 (colFilters: { colName: filterText, ... })
+    if (colFilters && typeof colFilters === 'object') {
+      for (const [col, val] of Object.entries(colFilters)) {
+        if (val && val.trim() && cols.includes(col)) {
+          conditions.push(`CAST("${col}" AS TEXT) LIKE ?`)
+          params.push(`%${val.trim()}%`)
+        }
+      }
     }
 
     const where = conditions.length ? 'WHERE ' + conditions.join(' AND ') : ''
@@ -413,6 +422,198 @@ ipcMain.handle('db:getAttackerProfiles', () => {
   }
 
   return Array.from(ipMap.values())
+})
+
+// ── IoC 수집 공통 헬퍼 ────────────────────────────────
+/**
+ * DB 에서 모든 위협 IP 를 수집해 Map 으로 반환.
+ * { ip → { ip, sources:Set, threat_tags:Set, first_seen, last_seen } }
+ */
+function _collectIoC () {
+  const tables = new Set(
+    db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map(r => r.name)
+  )
+  const has  = t => tables.has(t)
+  const safe = sql => { try { return db.prepare(sql).all() } catch { return [] } }
+
+  const ipMap = new Map()
+  const ensure = ip => {
+    if (!ipMap.has(ip)) ipMap.set(ip, { ip, sources: new Set(), threat_tags: new Set(), first_seen: null, last_seen: null })
+    return ipMap.get(ip)
+  }
+  const touch = (e, fs, ls) => {
+    if (fs && (!e.first_seen || fs < e.first_seen)) e.first_seen = fs
+    if (ls && (!e.last_seen  || ls > e.last_seen))  e.last_seen  = ls
+  }
+
+  if (has('authlog_bruteforce')) {
+    for (const r of safe(`SELECT src_ip, MIN(burst_start) fs, MAX(burst_end) ls FROM authlog_bruteforce WHERE src_ip!='' GROUP BY src_ip`)) {
+      const e = ensure(r.src_ip); e.sources.add('authlog_bruteforce'); e.threat_tags.add('brute_force'); touch(e, r.fs, r.ls)
+    }
+  }
+  if (has('authlog_login')) {
+    for (const r of safe(`SELECT src_ip, MIN(first_seen) fs, MAX(last_seen) ls FROM authlog_login WHERE src_ip!='' GROUP BY src_ip`)) {
+      const e = ensure(r.src_ip); e.sources.add('authlog_login'); e.threat_tags.add('ssh_login'); touch(e, r.fs, r.ls)
+    }
+  }
+  if (has('authlog_attack_ip')) {
+    for (const r of safe(`SELECT src_ip, first_seen fs, last_seen ls FROM authlog_attack_ip WHERE src_ip!=''`)) {
+      const e = ensure(r.src_ip); e.sources.add('authlog_attack_ip'); e.threat_tags.add('ssh_attempt'); touch(e, r.fs, r.ls)
+    }
+  }
+  if (has('nginx_attack')) {
+    for (const r of safe(`SELECT src_ip, MIN(date_time) fs, MAX(date_time) ls FROM nginx_attack WHERE src_ip IS NOT NULL AND src_ip!='' GROUP BY src_ip`)) {
+      const e = ensure(r.src_ip); e.sources.add('nginx_attack'); e.threat_tags.add('web_attack'); touch(e, r.fs, r.ls)
+    }
+  }
+  if (has('apache2_attack')) {
+    for (const r of safe(`SELECT src_ip, MIN(date_time) fs, MAX(date_time) ls FROM apache2_attack WHERE src_ip IS NOT NULL AND src_ip!='' GROUP BY src_ip`)) {
+      const e = ensure(r.src_ip); e.sources.add('apache2_attack'); e.threat_tags.add('web_attack'); touch(e, r.fs, r.ls)
+    }
+  }
+  if (has('nginx_webshell')) {
+    for (const r of safe(`SELECT src_ip, MIN(first_seen) fs, MAX(last_seen) ls FROM nginx_webshell WHERE src_ip!='' GROUP BY src_ip`)) {
+      const e = ensure(r.src_ip); e.sources.add('nginx_webshell'); e.threat_tags.add('webshell'); touch(e, r.fs, r.ls)
+    }
+  }
+  if (has('apache2_webshell')) {
+    for (const r of safe(`SELECT src_ip, MIN(first_seen) fs, MAX(last_seen) ls FROM apache2_webshell WHERE src_ip!='' GROUP BY src_ip`)) {
+      const e = ensure(r.src_ip); e.sources.add('apache2_webshell'); e.threat_tags.add('webshell'); touch(e, r.fs, r.ls)
+    }
+  }
+  if (has('syslog_ufw')) {
+    for (const r of safe(`SELECT src_ip, MIN(first_seen) fs, MAX(last_seen) ls FROM syslog_ufw WHERE src_ip!='' AND src_ip!='0.0.0.0' GROUP BY src_ip`)) {
+      const e = ensure(r.src_ip); e.sources.add('syslog_ufw'); e.threat_tags.add('ufw_block'); touch(e, r.fs, r.ls)
+    }
+  }
+  return ipMap
+}
+
+// ── IPC: IoC 목록 (전체 위협 IP 수집) ────────────────
+ipcMain.handle('db:getIoC', () => {
+  if (!db) return []
+  try {
+    const ipMap = _collectIoC()
+    return Array.from(ipMap.values()).map(e => ({
+      ip:          e.ip,
+      sources:     Array.from(e.sources),
+      threat_tags: Array.from(e.threat_tags),
+      first_seen:  e.first_seen,
+      last_seen:   e.last_seen,
+    })).sort((a, b) => (a.first_seen || '') < (b.first_seen || '') ? -1 : 1)
+  } catch { return [] }
+})
+
+// ── IPC: 그래프 데이터 (노드 + 엣지) ─────────────────
+ipcMain.handle('db:getGraphData', () => {
+  if (!db) return { nodes: [], edges: [] }
+  try {
+    // 서버 이름 (info 테이블 있으면 hostname 사용)
+    let serverLabel = '분석 서버'
+    try {
+      const infoExists = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='info'").get()
+      if (infoExists) {
+        const row = db.prepare("SELECT value FROM info WHERE key='hostname' LIMIT 1").get()
+          || db.prepare("SELECT hostname FROM info LIMIT 1").get()
+        if (row) serverLabel = row.value || row.hostname || '분석 서버'
+      }
+    } catch {}
+
+    const ipMap = _collectIoC()
+
+    // ── /24 서브넷 그룹핑 ─────────────────────────────
+    // 동일 /24 서브넷에 2개 이상의 IP → 서브넷 노드 생성
+    const subnetBuckets = new Map()   // prefix → [ip, ...]
+    for (const ip of ipMap.keys()) {
+      const m = ip.match(/^(\d+\.\d+\.\d+)\.\d+$/)
+      if (!m) continue
+      const pfx = m[1]
+      if (!subnetBuckets.has(pfx)) subnetBuckets.set(pfx, [])
+      subnetBuckets.get(pfx).push(ip)
+    }
+
+    // activeSubnets: prefix → { tags:Set, sources:Set, count }
+    const activeSubnets = new Map()
+    for (const [pfx, ips] of subnetBuckets) {
+      if (ips.length < 2) continue
+      const tags = new Set(), sources = new Set()
+      for (const ip of ips) {
+        const e = ipMap.get(ip)
+        if (!e) continue
+        for (const t of e.threat_tags) tags.add(t)
+        for (const s of e.sources)     sources.add(s)
+      }
+      activeSubnets.set(pfx, { tags, sources, count: ips.length })
+    }
+
+    // ── 공격 유형 노드 (atk:*) ────────────────────────
+    // 전체 데이터셋에서 사용된 위협 태그를 수집해 중간 노드로 생성
+    const allTags = new Set()
+    for (const e of ipMap.values())
+      for (const t of e.threat_tags) allTags.add(t)
+
+    // ── 노드/엣지 조립 ────────────────────────────────
+    const nodes = [{ id: 'server', type: 'server', label: serverLabel, threat_tags: [], sources: [] }]
+    const edges = []
+
+    // ① 공격 유형 노드 + server → atk 엣지
+    for (const tag of allTags) {
+      nodes.push({ id: `atk:${tag}`, type: 'attack', label: tag, threat_tags: [tag], sources: [] })
+      edges.push({ source: 'server', target: `atk:${tag}`, type: tag })
+    }
+
+    // ② 서브넷 노드 + atk → subnet 엣지 (태그별 1개)
+    for (const [pfx, { tags, sources, count }] of activeSubnets) {
+      nodes.push({
+        id:          `net:${pfx}`,
+        type:        'subnet',
+        label:       `${pfx}.0/24`,
+        ip_count:    count,
+        threat_tags: Array.from(tags),
+        sources:     Array.from(sources),
+      })
+      const seen = new Set()
+      for (const tag of tags) {
+        if (!seen.has(tag) && allTags.has(tag)) {
+          seen.add(tag)
+          edges.push({ source: `atk:${tag}`, target: `net:${pfx}`, type: tag })
+        }
+      }
+    }
+
+    // ③ IP 노드 + 엣지 (서브넷 안 → subnet→ip 멤버십, 독립 → atk→ip 직접)
+    for (const e of ipMap.values()) {
+      const m       = e.ip.match(/^(\d+\.\d+\.\d+)\.\d+$/)
+      const pfx     = m ? m[1] : null
+      const inSubnet = pfx && activeSubnets.has(pfx)
+
+      nodes.push({
+        id:          `ip:${e.ip}`,
+        type:        'ip',
+        label:       e.ip,
+        threat_tags: Array.from(e.threat_tags),
+        sources:     Array.from(e.sources),
+        first_seen:  e.first_seen,
+        last_seen:   e.last_seen,
+      })
+
+      if (inSubnet) {
+        // 멤버십 엣지: subnet → ip (공격 유형은 atk→subnet에서 이미 표현)
+        edges.push({ source: `net:${pfx}`, target: `ip:${e.ip}`, type: 'member' })
+      } else {
+        // 직접 연결: atk → ip (위협 태그별 1개)
+        const seen = new Set()
+        for (const tag of e.threat_tags) {
+          if (!seen.has(tag)) {
+            seen.add(tag)
+            edges.push({ source: `atk:${tag}`, target: `ip:${e.ip}`, type: tag })
+          }
+        }
+      }
+    }
+
+    return { nodes, edges }
+  } catch { return { nodes: [], edges: [] } }
 })
 
 // ── IPC: 테이블 date_time 컬럼 최솟값·최댓값 ─────────

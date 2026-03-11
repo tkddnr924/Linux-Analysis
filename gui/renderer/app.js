@@ -79,6 +79,18 @@ const TABS = [
     tables:   ['attacker_profile'],
     priority: 'attacker_profile',
   },
+  {
+    id:       'ioc',
+    label:    '🔗 IoC',
+    tables:   ['ioc_list'],
+    priority: 'ioc_list',
+  },
+  {
+    id:       'threat_graph',
+    label:    '🕸 관계도',
+    tables:   ['threat_graph'],
+    priority: 'threat_graph',
+  },
 ]
 
 /** 테이블별 한글 레이블 */
@@ -125,6 +137,10 @@ const TABLE_LABEL = {
   dpkg_suspicious:     '의심 패키지',
   // AI 분석
   attacker_profile:    '공격자 프로파일',
+  // IoC
+  ioc_list:            'IoC 목록',
+  // 위협 관계도
+  threat_graph:        '위협 관계도',
 }
 
 // ── 컬럼 타입 힌트 (컬럼명 키워드 기반) ──────────────
@@ -195,8 +211,9 @@ let currentTotal   = 0
 let currentColumns = []
 let currentSortCol = null
 let currentSortDir = 'ASC'
-let currentDateFrom = ''   // supertimeline 날짜 필터 시작 (YYYY-MM-DD)
-let currentDateTo   = ''   // supertimeline 날짜 필터 종료 (YYYY-MM-DD)
+let currentDateFrom   = ''   // supertimeline 날짜 필터 시작 (YYYY-MM-DD)
+let currentDateTo     = ''   // supertimeline 날짜 필터 종료 (YYYY-MM-DD)
+let currentColFilters = {}   // 컬럼별 필터 { colName: text, ... }
 let searchTimer    = null
 let tableCountMap  = new Map()  // tableName → count
 
@@ -286,6 +303,11 @@ async function onClickOpen () {
 
 // ── 테이블 목록 로드 ──────────────────────────────────
 async function loadTables () {
+  // DB 교체 시 IoC 캐시 및 그래프 세대 초기화
+  iocCache      = null
+  iocGraphData  = null
+  _graphInitGen = 0
+
   const tables = await window.api.getTables()
   tableCountMap = new Map(tables.map(t => [t.name, t.count]))
 
@@ -300,6 +322,16 @@ async function loadTables () {
   ]
   if (ATTACK_SOURCE_TABLES.some(t => (tableCountMap.get(t) ?? 0) > 0)) {
     tableCountMap.set('attacker_profile', 1)
+  }
+
+  // 가상 테이블: IoC 소스가 하나라도 있으면 ioc_list 활성화
+  const IOC_SOURCE_TABLES = [
+    'authlog_bruteforce', 'authlog_attack_ip', 'authlog_login',
+    'nginx_attack', 'apache2_attack', 'nginx_webshell', 'apache2_webshell', 'syslog_ufw',
+  ]
+  if (IOC_SOURCE_TABLES.some(t => (tableCountMap.get(t) ?? 0) > 0)) {
+    tableCountMap.set('ioc_list', 1)
+    tableCountMap.set('threat_graph', 1)
   }
 
   elWelcome.classList.add('hidden')
@@ -333,6 +365,10 @@ function renderTabBar () {
 async function switchTab (tabId) {
   const tab = TABS.find(t => t.id === tabId)
   if (!tab) return
+
+  // 탭 전환 시 그래프 인스턴스 정리
+  destroyGraph()
+  destroySummaryGraph()
 
   currentTabId = tabId
   currentTable = null
@@ -426,10 +462,11 @@ function _updateDateClearBtn () {
 
 // ── 테이블 선택 ──────────────────────────────────────
 async function selectTable (name) {
-  currentPage    = 0
-  currentSearch  = ''
-  currentSortCol = null
-  currentSortDir = 'ASC'
+  currentPage       = 0
+  currentSearch     = ''
+  currentSortCol    = null
+  currentSortDir    = 'ASC'
+  currentColFilters = {}
   elSearchInput.value = ''
   elBtnClear.classList.add('hidden')
 
@@ -463,27 +500,42 @@ async function selectTable (name) {
   })
 
   // 세션 분석은 커스텀 뷰
-  if (name === 'session_timeline') { await loadSessionView();   return }
+  if (name === 'session_timeline') { await loadSessionView();       return }
   // AI 공격자 프로파일은 커스텀 뷰
-  if (name === 'attacker_profile') { await loadAttackerView(); return }
+  if (name === 'attacker_profile') { await loadAttackerView();     return }
+  // IoC 목록 커스텀 뷰
+  if (name === 'nginx_webshell' || name === 'apache2_webshell') { await loadWebshellView(); return }
+  if (name === 'ioc_list') { await loadIoCView(); return }
+  // 위협 관계도 커스텀 뷰
+  if (name === 'threat_graph') { loadThreatGraphView(); return }
 
   await loadData()
 }
 
 // ── 데이터 로드 ──────────────────────────────────────
+// 커스텀 뷰 테이블: 가상 테이블이거나 자체 렌더러가 있어 loadData() 호출 불가
+const CUSTOM_VIEW_TABLES = new Set([
+  'threat_graph', 'ioc_list', 'session_timeline', 'attacker_profile',
+  'nginx_webshell', 'apache2_webshell',
+])
+
 async function loadData () {
   if (!currentTable) return
+  // 커스텀 뷰(가상 테이블 포함)는 loadData()로 렌더링하지 않음
+  // → 검색창 입력, 페이지 버튼, 날짜 필터 등이 그래프/커스텀 뷰를 덮어쓰는 사고 방지
+  if (CUSTOM_VIEW_TABLES.has(currentTable)) return
   setStatus('로딩 중…')
 
   const res = await window.api.getTableData({
-    table:    currentTable,
-    search:   currentSearch,
-    limit:    PAGE_SIZE,
-    offset:   currentPage * PAGE_SIZE,
-    sortCol:  currentSortCol,
-    sortDir:  currentSortDir,
-    dateFrom: currentDateFrom || undefined,
-    dateTo:   currentDateTo   || undefined,
+    table:      currentTable,
+    search:     currentSearch,
+    limit:      PAGE_SIZE,
+    offset:     currentPage * PAGE_SIZE,
+    sortCol:    currentSortCol,
+    sortDir:    currentSortDir,
+    dateFrom:   currentDateFrom || undefined,
+    dateTo:     currentDateTo   || undefined,
+    colFilters: Object.keys(currentColFilters).length ? currentColFilters : undefined,
   })
 
   if (res.error) {
@@ -517,12 +569,15 @@ function renderToolbar () {
   const label = TABLE_LABEL[currentTable] || currentTable
   elTableTitle.textContent = label
 
-  const grandTotal = (tableCountMap.get(currentTable) ?? 0).toLocaleString()
-  const hasFilter  = currentSearch || currentDateFrom || currentDateTo
+  const grandTotal    = (tableCountMap.get(currentTable) ?? 0).toLocaleString()
+  const activeColFilters = Object.values(currentColFilters).filter(v => v && v.trim()).length
+  const hasFilter     = currentSearch || currentDateFrom || currentDateTo || activeColFilters > 0
 
-  elTotalBadge.textContent = hasFilter
+  let badge = hasFilter
     ? `${currentTotal.toLocaleString()}건 / ${grandTotal}건 전체`
     : `${grandTotal}건 전체`
+  if (activeColFilters > 0) badge += ` · 열 필터 ${activeColFilters}개`
+  elTotalBadge.textContent = badge
 }
 
 // ── 테이블 렌더링 ─────────────────────────────────────
@@ -547,6 +602,13 @@ function renderTable (columns, rows) {
     const arrow    = isActive ? (currentSortDir === 'ASC' ? ' ↑' : ' ↓') : ''
     const cls      = isActive ? ' class="th-sorted"' : ''
     html += `<th${cls} data-col="${escHtml(col)}">${escHtml(col)}<span class="th-sort-icon">${arrow}</span></th>`
+  }
+  html += '</tr><tr class="filter-row">'
+  for (const col of columns) {
+    const val     = currentColFilters[col] || ''
+    const hasVal  = val.trim().length > 0
+    const inpCls  = hasVal ? ' col-filter active' : ' col-filter'
+    html += `<th class="filter-th"><input class="${inpCls.trim()}" data-col="${escHtml(col)}" placeholder="필터…" value="${escHtml(val)}" spellcheck="false"></th>`
   }
   html += '</tr></thead><tbody>'
 
@@ -729,8 +791,9 @@ function onSearchInput () {
 function onClearSearch () {
   elSearchInput.value = ''
   elBtnClear.classList.add('hidden')
-  currentSearch = ''
-  currentPage   = 0
+  currentSearch     = ''
+  currentColFilters = {}
+  currentPage       = 0
   loadData()
 }
 
@@ -738,12 +801,23 @@ function onClearSearch () {
 function openModal (columns, row) {
   let html = ''
   for (const col of columns) {
-    const raw = row[col]
-    const isNull = raw === null || raw === undefined
+    const raw     = row[col]
+    const isNull  = raw === null || raw === undefined
     const display = isNull ? 'NULL' : escHtml(String(raw))
+    // data-copy 에 원본 값을 저장 (NULL → 빈 문자열, 나머지는 raw 그대로)
+    const copyVal = isNull ? '' : escHtml(String(raw))
     html += `<div class="modal-row">
       <div class="modal-col-name">${escHtml(col)}</div>
       <div class="modal-col-val ${isNull ? 'is-null' : ''}">${display}</div>
+      <button class="modal-copy-btn" data-copy="${copyVal}" title="클립보드에 복사" tabindex="-1">
+        <svg class="copy-icon" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <rect x="5" y="5" width="9" height="10" rx="1.5" stroke="currentColor" stroke-width="1.3"/>
+          <path d="M11 5V3.5A1.5 1.5 0 0 0 9.5 2h-7A1.5 1.5 0 0 0 1 3.5v7A1.5 1.5 0 0 0 2.5 12H4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
+        </svg>
+        <svg class="check-icon" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <polyline points="2,8 6,12 14,4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </button>
     </div>`
   }
   elModalBody.innerHTML = html
@@ -754,6 +828,28 @@ function closeModal () {
   elModal.classList.add('hidden')
   elModalBody.innerHTML = ''
 }
+
+// 모달 내 복사 버튼 클릭 → 클립보드 저장
+elModalBody.addEventListener('click', async e => {
+  const btn = e.target.closest('.modal-copy-btn')
+  if (!btn) return
+  const text = btn.dataset.copy ?? ''
+  try {
+    await navigator.clipboard.writeText(text)
+  } catch {
+    // fallback: execCommand (샌드박스 환경 대응)
+    const ta = document.createElement('textarea')
+    ta.value = text
+    ta.style.cssText = 'position:fixed;opacity:0;pointer-events:none'
+    document.body.appendChild(ta)
+    ta.select()
+    document.execCommand('copy')
+    ta.remove()
+  }
+  // 복사 완료 피드백: 체크 아이콘으로 교체 후 1.5초 뒤 원복
+  btn.classList.add('copied')
+  setTimeout(() => btn.classList.remove('copied'), 1500)
+})
 
 // ── 위협 요약 스트립 + 커스텀 카드 뷰 ──────────────────
 
@@ -902,9 +998,11 @@ function renderInfoCards (rows) {
   </div>`
 
   html += '</div>'
+
   elDataTable.innerHTML = html
   setupThreatStripListeners(elDataTable)
 }
+
 
 /** 로그 타입 아이콘 매핑 */
 const LOG_ICONS = {
@@ -1588,6 +1686,1106 @@ async function navigateToTable (tableName) {
   }
 }
 
+// ══════════════════════════════════════════════════════
+// ── IoC & 관계 그래프 ──────────────────────────────────
+// ══════════════════════════════════════════════════════
+
+/** 위협 태그 메타데이터 */
+const IOC_TAG = {
+  brute_force:  { label: 'SSH 브루트포스',  cls: 'itag-red',    icon: '🔨', edgeColor: '#f85149' },
+  ssh_login:    { label: 'SSH 로그인 성공', cls: 'itag-orange', icon: '🔑', edgeColor: '#ff7b72' },
+  ssh_attempt:  { label: 'SSH 접근 시도',  cls: 'itag-green',  icon: '🔌', edgeColor: '#3fb950' },
+  web_attack:   { label: '웹 공격',        cls: 'itag-yellow', icon: '🕷',  edgeColor: '#d29922' },
+  webshell:     { label: '웹쉘 접근',      cls: 'itag-purple', icon: '💀', edgeColor: '#bc8cff' },
+  ufw_block:    { label: '방화벽 차단',    cls: 'itag-gray',   icon: '🛡',  edgeColor: '#6e7681' },
+}
+
+/** 출처 테이블 → 설명 매핑 */
+const SOURCE_DESC = {
+  authlog_bruteforce: { icon: '🔨', text: 'SSH 브루트포스 공격 탐지' },
+  authlog_login:      { icon: '🔑', text: 'SSH 로그인 성공 기록' },
+  authlog_attack_ip:  { icon: '🔌', text: 'SSH 접근 시도 기록' },
+  nginx_attack:       { icon: '🕷', text: 'Nginx 웹 공격 탐지' },
+  apache2_attack:     { icon: '🕷', text: 'Apache 웹 공격 탐지' },
+  nginx_webshell:     { icon: '💀', text: 'Nginx 웹쉘 접근 탐지' },
+  apache2_webshell:   { icon: '💀', text: 'Apache 웹쉘 접근 탐지' },
+  syslog_ufw:         { icon: '🛡', text: 'UFW 방화벽 차단 기록' },
+}
+
+/** 위협 태그 우선순위로 노드 색상 결정 */
+function iocNodeColor (tags) {
+  if (tags.includes('webshell'))    return '#bc8cff'
+  if (tags.includes('brute_force') && tags.includes('ssh_login')) return '#f85149'
+  if (tags.includes('ssh_login'))   return '#ff7b72'
+  if (tags.includes('brute_force')) return '#d29922'
+  if (tags.includes('web_attack'))  return '#388bfd'
+  if (tags.includes('ssh_attempt')) return '#3fb950'
+  return '#6e7681'
+}
+
+let iocCache        = null   // 캐시된 IoC 데이터 배열
+let iocGraphData    = null   // 캐시된 그래프 데이터
+let currentGraph    = null   // IoC 상세 패널 미니 ForceGraph
+let summaryGraph    = null   // 요약 탭 ForceGraph
+let _graphInitGen   = 0      // 요약 그래프 초기화 세대 번호 (race condition 방지)
+let iocTypeFilter   = 'ip'   // 'ip' | 'domain'
+let iocSearch       = ''
+let iocSelectedItem = null
+
+// ── 위협 관계도 뷰 (전체 화면 그래프) ──────────────────
+function loadThreatGraphView () {
+  destroySummaryGraph()
+  elTableTitle.textContent = '위협 관계도'
+  elTotalBadge.textContent = ''
+  setStatus('')
+
+  elDataTable.innerHTML = `
+    <div class="threat-graph-page">
+      <div class="summary-graph-legend" id="summary-graph-legend"></div>
+      <div class="summary-graph-wrap threat-graph-canvas" id="summary-graph-wrap">
+        <div class="summary-graph-loading">그래프 데이터 로딩 중…</div>
+      </div>
+    </div>`
+
+  // requestAnimationFrame: DOM 삽입 후 브라우저가 레이아웃을 한 번 계산하도록
+  // → getBoundingClientRect()가 올바른 캔버스 크기를 반환하게 됨
+  requestAnimationFrame(() => _initSummaryGraph())
+}
+
+// ── IoC 진입점 ────────────────────────────────────────
+async function loadIoCView () {
+  destroyGraph()
+  elTableTitle.textContent = 'IoC 목록'
+  elTotalBadge.textContent = '…'
+  setStatus('IoC 데이터 로딩 중…')
+
+  if (!iocCache) {
+    iocCache = await window.api.getIoC()
+  }
+  elTotalBadge.textContent = `${iocCache.length}개 IP`
+  setStatus('')
+  iocSelectedItem = null
+  renderIoCContainer()
+}
+
+// ── IoC 컨테이너 ──────────────────────────────────────
+function renderIoCContainer () {
+  const ipCount = iocCache ? iocCache.length : 0
+
+  elDataTable.innerHTML = `
+    <div class="ioc-wrap">
+      <div class="ioc-toolbar">
+        <div class="ioc-type-tabs">
+          <button class="ioc-ttab ${iocTypeFilter === 'ip'     ? 'active' : ''}" data-type="ip">🌐 IP <span class="ioc-cnt">${ipCount}</span></button>
+          <button class="ioc-ttab ${iocTypeFilter === 'domain' ? 'active' : ''}" data-type="domain">🔤 Domain <span class="ioc-cnt">0</span></button>
+        </div>
+        <div class="ioc-search-wrap">
+          <span class="ioc-search-icon">🔍</span>
+          <input class="ioc-search" id="ioc-search-input"
+            placeholder="IP · 위협 유형 검색…"
+            value="${escHtml(iocSearch)}" />
+        </div>
+      </div>
+      <div class="ioc-main">
+        <div class="ioc-list-pane" id="ioc-list-pane"></div>
+        <div class="ioc-detail-pane hidden" id="ioc-detail-pane"></div>
+      </div>
+    </div>`
+
+  elDataTable.querySelectorAll('.ioc-ttab').forEach(btn => {
+    btn.addEventListener('click', () => {
+      if (btn.dataset.type === iocTypeFilter) return
+      iocTypeFilter = btn.dataset.type
+      iocSelectedItem = null
+      destroyGraph()
+      elDataTable.querySelectorAll('.ioc-ttab').forEach(b =>
+        b.classList.toggle('active', b.dataset.type === iocTypeFilter))
+      document.getElementById('ioc-detail-pane')?.classList.add('hidden')
+      renderIoCList()
+    })
+  })
+
+  document.getElementById('ioc-search-input')?.addEventListener('input', e => {
+    iocSearch = e.target.value.trim().toLowerCase()
+    renderIoCList()
+  })
+
+  renderIoCList()
+}
+
+// ── IoC 목록 테이블 ───────────────────────────────────
+function renderIoCList () {
+  const pane = document.getElementById('ioc-list-pane')
+  if (!pane) return
+
+  if (iocTypeFilter === 'domain') {
+    pane.innerHTML = `<div class="empty-state">
+      <div class="empty-state-icon">🔤</div>
+      <div>Domain IoC는 현재 지원되지 않습니다</div>
+      <div class="empty-state-sub">수집된 로그에서 도메인 데이터가 없습니다</div>
+    </div>`
+    return
+  }
+
+  if (!iocCache || !iocCache.length) {
+    pane.innerHTML = `<div class="empty-state"><div class="empty-state-icon">🔍</div><div>수집된 IoC IP가 없습니다</div></div>`
+    return
+  }
+
+  const filtered = iocCache.filter(d => {
+    if (!iocSearch) return true
+    const tags = (d.threat_tags || []).map(t => IOC_TAG[t]?.label || t).join(' ')
+    return d.ip.toLowerCase().includes(iocSearch) || tags.toLowerCase().includes(iocSearch)
+  })
+
+  if (!filtered.length) {
+    pane.innerHTML = `<div class="empty-state"><div class="empty-state-icon">🔍</div>
+      <div>"${escHtml(iocSearch)}" 검색 결과 없음</div></div>`
+    return
+  }
+
+  const rows = filtered.map(d => {
+    const priv = isPrivateIP(d.ip)
+    const badge = priv
+      ? `<span class="ioc-badge ioc-priv">🏠 사설</span>`
+      : `<span class="ioc-badge ioc-pub">🌐 공인</span>`
+    const tags = (d.threat_tags || []).map(t => {
+      const m = IOC_TAG[t] || { label: t, cls: 'itag-gray', icon: '•' }
+      return `<span class="ioc-tag ${m.cls}">${m.icon} ${m.label}</span>`
+    }).join('')
+    const active = iocSelectedItem?.ip === d.ip ? ' active' : ''
+    return `<tr class="ioc-row${active}" data-ip="${escHtml(d.ip)}">
+      <td class="ioc-ip-cell">${escHtml(d.ip)}</td>
+      <td>${badge}</td>
+      <td class="ioc-tags-cell">${tags || '<span class="val-null">—</span>'}</td>
+    </tr>`
+  }).join('')
+
+  pane.innerHTML = `
+    <table class="ioc-table">
+      <colgroup>
+        <col style="width:140px"><col style="width:76px"><col>
+      </colgroup>
+      <thead><tr>
+        <th>IP 주소</th><th>구분</th><th>위협 유형</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`
+
+  pane.querySelectorAll('.ioc-row').forEach(tr => {
+    tr.addEventListener('click', () => {
+      const item = filtered.find(d => d.ip === tr.dataset.ip)
+      if (!item) return
+      iocSelectedItem = item
+      pane.querySelectorAll('.ioc-row').forEach(r => r.classList.remove('active'))
+      tr.classList.add('active')
+      renderIoCDetail(item)
+    })
+  })
+}
+
+// ── IoC 상세 패널 ─────────────────────────────────────
+function renderIoCDetail (item) {
+  const pane = document.getElementById('ioc-detail-pane')
+  if (!pane) return
+  pane.classList.remove('hidden')
+  destroyGraph()
+
+  const priv = isPrivateIP(item.ip)
+  const tags = (item.threat_tags || []).map(t => {
+    const m = IOC_TAG[t] || { label: t, cls: 'itag-gray', icon: '•' }
+    return `<span class="ioc-tag ${m.cls}">${m.icon} ${m.label}</span>`
+  }).join('')
+
+  const srcItems = (item.sources || []).map(s => {
+    const d = SOURCE_DESC[s] || { icon: '📋', text: s }
+    return `<div class="ioc-source-item">
+      <span class="ioc-source-icon">${d.icon}</span>
+      <div class="ioc-source-info">
+        <div class="ioc-source-desc">${escHtml(d.text)}</div>
+        <code class="ioc-source-table">${escHtml(s)}</code>
+      </div>
+    </div>`
+  }).join('')
+
+  pane.innerHTML = `
+    <div class="ioc-detail-header">
+      <div class="ioc-detail-hinfo">
+        <div class="gd-title">${escHtml(item.ip)}</div>
+        <span class="ioc-badge ${priv ? 'ioc-priv' : 'ioc-pub'}">${priv ? '🏠 사설 IP' : '🌐 공인 IP'}</span>
+      </div>
+      <button class="ioc-detail-close" id="ioc-detail-close">✕</button>
+    </div>
+    <div class="ioc-detail-scroll">
+      <div class="gd-section">
+        <div class="gd-sec-title">위협 유형</div>
+        <div class="gd-tags">${tags || '<span class="val-null">탐지된 위협 없음</span>'}</div>
+      </div>
+      <div class="gd-section">
+        <div class="gd-sec-title">탐지 출처 — 어디 서버에서 어떤 이유로</div>
+        <div class="ioc-source-list">${srcItems || '<span class="val-null">—</span>'}</div>
+      </div>
+      <button class="gd-search-btn" id="ioc-detail-search" data-ip="${escHtml(item.ip)}">
+        🔍 전역 검색에서 찾기
+      </button>
+      <div class="gd-section">
+        <div class="gd-sec-title">관계 그래프</div>
+        <div class="ioc-mini-graph" id="ioc-mini-graph"></div>
+      </div>
+    </div>`
+
+  document.getElementById('ioc-detail-close')?.addEventListener('click', () => {
+    pane.classList.add('hidden')
+    iocSelectedItem = null
+    destroyGraph()
+    document.getElementById('ioc-list-pane')
+      ?.querySelectorAll('.ioc-row').forEach(r => r.classList.remove('active'))
+  })
+
+  document.getElementById('ioc-detail-search')?.addEventListener('click', e => {
+    elSearchInput.value = e.currentTarget.dataset.ip
+    onSearchInput()
+  })
+
+  _initMiniGraph(item)
+}
+
+// ── 미니 그래프 (상세 패널용) ─────────────────────────
+async function _initMiniGraph (item) {
+  const wrap = document.getElementById('ioc-mini-graph')
+  if (!wrap) return
+
+  if (!iocGraphData) {
+    iocGraphData = await window.api.getGraphData()
+  }
+  const serverNode  = iocGraphData?.nodes?.find(n => n.type === 'server')
+  const serverLabel = serverNode?.label || '분석 서버'
+
+  // server → [공격유형 노드] → ip 구조
+  const atkNodes = (item.threat_tags || []).map(tag => ({
+    id: `atk:${tag}`, type: 'attack', label: tag, threat_tags: [tag], sources: [],
+  }))
+  const nodes = [
+    { id: 'server', type: 'server', label: serverLabel, threat_tags: [], sources: [] },
+    ...atkNodes,
+    { id: `ip:${item.ip}`, type: 'ip', label: item.ip,
+      threat_tags: item.threat_tags, sources: item.sources },
+  ]
+  const edges = [
+    ...(item.threat_tags || []).map(tag => ({ source: 'server',      target: `atk:${tag}`,      type: tag })),
+    ...(item.threat_tags || []).map(tag => ({ source: `atk:${tag}`, target: `ip:${item.ip}`, type: tag })),
+  ]
+
+  currentGraph = new ForceGraph(wrap, { nodes, edges }, { compact: true, onSelect: () => {} })
+}
+
+
+// ── 웹쉘 뷰 ──────────────────────────────────────────
+let _wsCache    = null   // Map<filePath, {file_name,file_path,vhost,suspicion_score,suspicion_flags,ips:[]}>
+let _wsSelected = null   // 현재 선택된 file_path
+
+async function loadWebshellView () {
+  destroyGraph()
+  elTableTitle.textContent = '웹쉘 탐지'
+  elTotalBadge.textContent = '…'
+  setStatus('웹쉘 데이터 로딩 중…')
+
+  const res = await window.api.getTableData({
+    table: currentTable, page: 1, pageSize: 9999,
+    search: '', sortCol: '', sortDir: 'ASC',
+  })
+
+  setStatus('')
+  if (!res || res.error) {
+    elDataTable.innerHTML = `<div class="empty-state">
+      <div class="empty-state-icon">⚠️</div>
+      <div>${escHtml(res?.error || '데이터 로드 실패')}</div></div>`
+    return
+  }
+
+  // ── file_path 기준 그룹화 ────────────────────────────
+  const groupMap = new Map()
+  for (const row of (res.rows || [])) {
+    const fp = row['file_path'] || ''
+    if (!groupMap.has(fp)) {
+      groupMap.set(fp, {
+        file_name:       row['file_name']       || fp,
+        file_path:       fp,
+        vhost:           row['vhost']           || '',
+        suspicion_score: row['suspicion_score'] || 0,
+        suspicion_flags: row['suspicion_flags'] || '',
+        ips: [],
+      })
+    }
+    const g = groupMap.get(fp)
+    if ((row['suspicion_score'] || 0) > g.suspicion_score) {
+      g.suspicion_score = row['suspicion_score'] || 0
+      g.suspicion_flags = row['suspicion_flags'] || ''
+    }
+    g.ips.push({
+      src_ip:       row['src_ip']       || '',
+      access_count: row['access_count'] || 0,
+      first_seen:   row['first_seen']   || '',
+      last_seen:    row['last_seen']    || '',
+    })
+  }
+
+  elTotalBadge.textContent = `${groupMap.size}개 파일`
+  _wsCache    = groupMap
+  _wsSelected = null
+  _renderWsContainer()
+}
+
+function _renderWsContainer () {
+  if (!_wsCache || !_wsCache.size) {
+    elDataTable.innerHTML = `<div class="empty-state">
+      <div class="empty-state-icon">✅</div>
+      <div>탐지된 웹쉘이 없습니다</div></div>`
+    return
+  }
+  elDataTable.innerHTML = `
+    <div class="ws-wrap">
+      <div class="ws-list-pane" id="ws-list-pane"></div>
+      <div class="ws-detail-pane hidden" id="ws-detail-pane"></div>
+    </div>`
+  _renderWsList()
+}
+
+function _renderWsList () {
+  const pane = document.getElementById('ws-list-pane')
+  if (!pane || !_wsCache) return
+
+  const sorted = [..._wsCache.values()]
+    .sort((a, b) => b.suspicion_score - a.suspicion_score)
+
+  const rows = sorted.map(g => {
+    const active = _wsSelected === g.file_path ? ' active' : ''
+    const sc     = g.suspicion_score
+    const scCls  = sc >= 5 ? 'ws-score-h' : sc >= 3 ? 'ws-score-m' : 'ws-score-l'
+    const flags  = (g.suspicion_flags || '').split(',').map(f => f.trim()).filter(Boolean)
+    const fHtml  = flags.map(f => `<span class="ws-flag">${escHtml(f)}</span>`).join('')
+    const ipCnt  = g.ips.length
+    return `<tr class="ws-row${active}" data-path="${escHtml(g.file_path)}">
+      <td class="ws-name-cell">
+        <div class="ws-name-row">
+          <span class="ws-icon">💀</span>
+          <span class="ws-name">${escHtml(g.file_name)}</span>
+          <span class="ws-score ${scCls}">${sc}</span>
+        </div>
+        <div class="ws-flags">${fHtml}</div>
+      </td>
+      <td class="ws-path-cell">
+        <span class="ws-path" title="${escHtml(g.file_path)}">${escHtml(g.file_path)}</span>
+        <span class="ws-ip-cnt">${ipCnt}개 IP</span>
+      </td>
+    </tr>`
+  }).join('')
+
+  pane.innerHTML = `
+    <table class="ws-table">
+      <colgroup><col style="width:50%"><col></colgroup>
+      <thead><tr>
+        <th>파일명</th>
+        <th>경로</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`
+
+  pane.querySelectorAll('.ws-row').forEach(tr => {
+    tr.addEventListener('click', () => {
+      _wsSelected = tr.dataset.path
+      pane.querySelectorAll('.ws-row').forEach(r => r.classList.remove('active'))
+      tr.classList.add('active')
+      _renderWsDetail(_wsCache.get(_wsSelected))
+    })
+  })
+}
+
+function _renderWsDetail (g) {
+  const pane = document.getElementById('ws-detail-pane')
+  if (!pane || !g) return
+  pane.classList.remove('hidden')
+
+  const totalAcc = g.ips.reduce((s, ip) => s + (ip.access_count || 0), 0)
+  const flags    = (g.suspicion_flags || '').split(',').map(f => f.trim()).filter(Boolean)
+  const fHtml    = flags.map(f => `<span class="ws-flag">${escHtml(f)}</span>`).join('')
+  const sc       = g.suspicion_score
+  const scCls    = sc >= 5 ? 'ws-score-h' : sc >= 3 ? 'ws-score-m' : 'ws-score-l'
+
+  const ipRows = [...g.ips]
+    .sort((a, b) => (b.access_count || 0) - (a.access_count || 0))
+    .map(ip => `<tr>
+      <td class="ws-d-ip">${escHtml(ip.src_ip)}</td>
+      <td class="ws-d-cnt">${ip.access_count || 0}</td>
+      <td class="ws-d-time" title="${escHtml(ip.first_seen)}">${escHtml((ip.first_seen || '').slice(0, 16) || '—')}</td>
+      <td class="ws-d-time" title="${escHtml(ip.last_seen)}">${escHtml((ip.last_seen  || '').slice(0, 16) || '—')}</td>
+    </tr>`).join('')
+
+  pane.innerHTML = `
+    <div class="ws-d-header">
+      <div class="ws-d-hinfo">
+        <span class="ws-icon">💀</span>
+        <div>
+          <div class="ws-d-name">${escHtml(g.file_name)}</div>
+          <div class="ws-d-path">${escHtml(g.file_path)}</div>
+        </div>
+      </div>
+      <button class="ws-d-close" id="ws-d-close">✕</button>
+    </div>
+    <div class="ws-d-meta">
+      <span class="ws-score ${scCls}">위험도 ${sc}</span>
+      ${fHtml}
+    </div>
+    <div class="ws-d-stats">IP ${g.ips.length}개 &middot; 총 접근 ${totalAcc}회</div>
+    <div class="ws-d-body">
+      <table class="ws-d-table">
+        <thead><tr>
+          <th>IP 주소</th><th>횟수</th><th>최초 접근</th><th>마지막 접근</th>
+        </tr></thead>
+        <tbody>${ipRows}</tbody>
+      </table>
+    </div>`
+
+  document.getElementById('ws-d-close')?.addEventListener('click', () => {
+    pane.classList.add('hidden')
+    _wsSelected = null
+    document.getElementById('ws-list-pane')
+      ?.querySelectorAll('.ws-row').forEach(r => r.classList.remove('active'))
+  })
+}
+
+// ── 요약 탭 전체 그래프 ───────────────────────────────
+async function _initSummaryGraph () {
+  // 세대 번호 발급 — await 이후 더 새로운 호출이 있었으면 중단
+  const gen = ++_graphInitGen
+  destroySummaryGraph()
+  const wrap = document.getElementById('summary-graph-wrap')
+  if (!wrap) return
+
+  try {
+    if (!iocGraphData) {
+      iocGraphData = await window.api.getGraphData()
+    }
+    // await 이후: 이미 더 새 호출이 시작됐거나 wrap이 교체된 경우 중단
+    if (gen !== _graphInitGen) return
+    if (document.getElementById('summary-graph-wrap') !== wrap) return
+
+    let { nodes, edges } = (iocGraphData || { nodes: [], edges: [] })
+    const MAX = 80
+    const ipNodes     = nodes.filter(n => n.type === 'ip')
+    const subnetNodes = nodes.filter(n => n.type === 'subnet')
+    const atkNodes    = nodes.filter(n => n.type === 'attack')
+
+    if (ipNodes.length === 0) {
+      wrap.innerHTML = `<div class="summary-graph-empty">위협 IP 데이터 없음</div>`
+      return
+    }
+    if (ipNodes.length > MAX) {
+      const score = t =>
+        (t.includes('webshell') ? 6 : 0) +
+        (t.includes('brute_force') ? 3 : 0) +
+        (t.includes('ssh_login') ? 2 : 0) +
+        t.length
+      const ranked = [...ipNodes].sort((a, b) =>
+        score(b.threat_tags || []) - score(a.threat_tags || [])
+      ).slice(0, MAX)
+      const allowedIpIds = new Set(ranked.map(n => n.id))
+      // 구조 노드(server, atk, subnet)는 항상 유지
+      const allowed = new Set([
+        'server',
+        ...allowedIpIds,
+        ...atkNodes.map(n => n.id),
+        ...subnetNodes.map(n => n.id),
+      ])
+      nodes = nodes.filter(n => allowed.has(n.id))
+      edges = edges.filter(e => allowed.has(e.source) && allowed.has(e.target))
+    }
+
+    wrap.innerHTML = ''  // 로딩 텍스트 지움
+
+    // 범례 렌더링
+    const legendEl = document.getElementById('summary-graph-legend')
+    if (legendEl) {
+      legendEl.innerHTML =
+        Object.entries(IOC_TAG).map(([, m]) =>
+          `<span class="gl-item"><span class="gl-dot" style="background:${m.edgeColor}"></span>${m.label}</span>`
+        ).join('') +
+        `<span class="gl-sep"></span>` +
+        `<span class="gl-item"><span class="gl-node-dot" style="background:#388bfd"></span>분석 서버</span>` +
+        `<span class="gl-item">⚡ 공격 유형 노드</span>` +
+        `<span class="gl-item">📡 /24 서브넷 그룹</span>` +
+        `<span class="gl-item gl-hint">스크롤: 줌 · 드래그: 이동 · 클릭: 상세</span>`
+
+      if (ipNodes.length > MAX) {
+        legendEl.insertAdjacentHTML('beforeend',
+          `<span class="graph-cap-banner">위협 점수 상위 ${MAX}개 IP 표시</span>`)
+      }
+    }
+
+    summaryGraph = new ForceGraph(wrap, { nodes, edges }, {
+      compact: false,
+      onSelect: node => {
+        if (!node || node.type === 'server' || node.type === 'subnet' || node.type === 'attack') return
+        navigateToTable('ioc_list').then(() => {
+          setTimeout(() => {
+            document.querySelectorAll('.ioc-row').forEach(r => {
+              if (r.dataset.ip === node.label) r.click()
+            })
+          }, 350)
+        })
+      },
+    })
+  } catch (err) {
+    console.error('summary graph error:', err)
+    const wrap2 = document.getElementById('summary-graph-wrap')
+    if (wrap2) wrap2.innerHTML = `<div class="summary-graph-empty">그래프 로딩 실패</div>`
+  }
+}
+
+// ── 그래프 정리 ───────────────────────────────────────
+function destroyGraph () {
+  if (currentGraph) { currentGraph.destroy(); currentGraph = null }
+}
+function destroySummaryGraph () {
+  if (summaryGraph) { summaryGraph.destroy(); summaryGraph = null }
+}
+
+// ── Force-Directed Graph Engine ───────────────────────
+class ForceGraph {
+  static EDGE_COLOR  = Object.fromEntries(Object.entries(IOC_TAG).map(([k, v]) => [k, v.edgeColor]))
+  static EDGE_LABEL  = Object.fromEntries(Object.entries(IOC_TAG).map(([k, v]) => [k, v.label]))
+
+  constructor (container, data, { onSelect, compact = false } = {}) {
+    this.container = container
+    this.onSelect  = onSelect || (() => {})
+    this.compact   = compact  // compact=true: 미니 그래프 모드
+
+    // Canvas + tooltip overlay
+    this.canvas  = document.createElement('canvas')
+    this.canvas.style.cssText = 'position:absolute;inset:0;cursor:grab'
+    this.tooltip = document.createElement('div')
+    this.tooltip.className = 'graph-tooltip'
+    container.style.position = 'relative'
+    container.appendChild(this.canvas)
+    container.appendChild(this.tooltip)
+
+    // compact 모드: 노드 크기 축소
+    // 계층: server(중심) → attack(1차) → subnet(2차) → ip(외부)
+    const srvR    = compact ? 18 : 26
+    const atkR    = compact ? 13 : 18   // 공격 유형 중간 노드
+    const subnetR = compact ? 12 : 16   // 서브넷 그룹 노드
+    const ipR     = compact ?  9 : 12   // IP 노드 (가장 바깥)
+
+    // Process nodes — compute edge group indices for parallel edge curves
+    this.nodes = data.nodes.map(n => ({
+      ...n,
+      color: n.type === 'server' ? '#388bfd'
+           : n.type === 'attack' ? (IOC_TAG[n.label]?.edgeColor || '#6e7681')
+           : iocNodeColor(n.threat_tags || []),
+      is_private: n.type === 'ip' ? isPrivateIP(n.label) : false,
+      radius: n.type === 'server' ? srvR
+            : n.type === 'attack' ? atkR
+            : n.type === 'subnet' ? subnetR
+            : ipR,
+      x: 0, y: 0, vx: 0, vy: 0, fx: 0, fy: 0,
+      fixed: n.type === 'server',
+    }))
+    this.nodeById  = new Map(this.nodes.map(n => [n.id, n]))
+
+    // Assign group index for parallel edges (same src+tgt pair)
+    const groupMap = new Map()
+    for (const e of data.edges) {
+      const key = [e.source, e.target].sort().join('||')
+      if (!groupMap.has(key)) groupMap.set(key, [])
+      groupMap.get(key).push(e)
+    }
+    this.edges = data.edges.map(e => {
+      const key   = [e.source, e.target].sort().join('||')
+      const group = groupMap.get(key)
+      return { ...e, _gi: group.indexOf(e), _gs: group.length,
+        sourceNode: this.nodeById.get(e.source),
+        targetNode: this.nodeById.get(e.target) }
+    })
+
+    // Per-node edge list for hit highlight
+    this.nodeEdges = new Map(this.nodes.map(n => [n.id, []]))
+    this.edges.forEach(e => {
+      this.nodeEdges.get(e.source)?.push(e)
+      this.nodeEdges.get(e.target)?.push(e)
+    })
+
+    // State
+    this.selected   = null
+    this.hovered    = null
+    this.dragged    = null
+    this.pan        = { x: 0, y: 0 }
+    this.scale      = 1
+    this.isPanning  = false
+    this.panStart   = { x: 0, y: 0 }
+    this.alpha      = 1
+    this.destroyed  = false
+
+    this._dpr = window.devicePixelRatio || 1
+    this.W    = 0
+    this.H    = 0
+
+    this._userInteracted = false  // 사용자가 직접 pan/zoom 했는지 여부
+
+    this._resizeObs = new ResizeObserver(() => this._resize())
+    this._resizeObs.observe(container)
+    this._resize()
+    this._initPositions()
+    // 초기 배치 후 즉시 auto-fit: 모든 노드가 캔버스에 맞게 보이도록
+    if (this.W > 0 && this.H > 0) this._autoFit()
+    this._bindEvents()
+    this._startLoop()
+  }
+
+  // ── Layout ─────────────────────────────────────────
+  _resize () {
+    const dpr  = window.devicePixelRatio || 1
+    const rect = this.container.getBoundingClientRect()
+    this.W = rect.width; this.H = rect.height
+    this.canvas.width  = rect.width  * dpr
+    this.canvas.height = rect.height * dpr
+    this.canvas.style.width  = rect.width  + 'px'
+    this.canvas.style.height = rect.height + 'px'
+    this._dpr  = dpr
+    this.alpha = Math.max(this.alpha, 0.3)
+  }
+
+  _initPositions () {
+    const cx = this.W / 2 || 400, cy = this.H / 2 || 300
+    // safeR: 컨테이너 반경의 68% — 초기 배치를 화면 중앙에 촘촘히 모음 (0.80→0.68)
+    const safeR = Math.min((this.W || 800) / 2, (this.H || 600) / 2) * 0.68
+
+    const server = this.nodes.find(n => n.type === 'server')
+    if (server) { server.x = cx; server.y = cy }
+
+    const atkNodes    = this.nodes.filter(n => n.type === 'attack')
+    const subnetNodes = this.nodes.filter(n => n.type === 'subnet')
+    const ipNodes     = this.nodes.filter(n => n.type === 'ip')
+
+    if (atkNodes.length === 0) {
+      // 공격 유형 노드 없음 — 단순 원형 배치
+      const others = this.nodes.filter(n => n.type !== 'server')
+      const r = safeR * 0.68
+      others.forEach((n, i) => {
+        const a = (2 * Math.PI * i) / Math.max(others.length, 1) - Math.PI / 2
+        n.x = cx + r * Math.cos(a) + (Math.random() - 0.5) * 50
+        n.y = cy + r * Math.sin(a) + (Math.random() - 0.5) * 50
+      })
+      return
+    }
+
+    // ① atk 노드 → 1단 링 (중심 가까이)
+    const rAtk = safeR * 0.22
+    const atkAngleMap = new Map()
+    atkNodes.forEach((n, i) => {
+      const a = (2 * Math.PI * i) / atkNodes.length - Math.PI / 2
+      n.x = cx + rAtk * Math.cos(a)
+      n.y = cy + rAtk * Math.sin(a)
+      atkAngleMap.set(n.id, a)
+    })
+
+    // ② subnet 노드 → 2단 링 (연결된 atk 방향으로 클러스터)
+    const rSub = safeR * 0.52
+    const subnetAngleMap = new Map()
+    subnetNodes.forEach((n, i) => {
+      // 이 서브넷으로 들어오는 atk→subnet 엣지의 source 탐색
+      const pEdge = this.edges.find(e =>
+        e.target === n.id && this.nodeById.get(e.source)?.type === 'attack'
+      )
+      const baseA = pEdge && atkAngleMap.has(pEdge.source)
+        ? atkAngleMap.get(pEdge.source)
+        : (2 * Math.PI * i) / Math.max(subnetNodes.length, 1) - Math.PI / 2
+
+      n.x = cx + rSub * Math.cos(baseA) + (Math.random() - 0.5) * 16
+      n.y = cy + rSub * Math.sin(baseA) + (Math.random() - 0.5) * 16
+      subnetAngleMap.set(n.id, baseA)
+    })
+
+    // ③ ip 노드 → 3단 링 (부모 subnet 또는 atk 방향으로 클러스터)
+    // safeR * 0.88 → 컨테이너 안에 완전히 들어오는 최외각 링
+    const rIp = safeR * 0.88
+    const jitterIp = this.compact ? 12 : 24
+    ipNodes.forEach((n, i) => {
+      // 이 IP로 들어오는 엣지 (subnet→ip 또는 atk→ip)
+      const pEdge = this.edges.find(e => e.target === n.id)
+      const pId   = pEdge?.source || null
+      const pType = pId ? this.nodeById.get(pId)?.type : null
+
+      let baseA
+      if (pType === 'subnet' && subnetAngleMap.has(pId))
+        baseA = subnetAngleMap.get(pId)
+      else if (pType === 'attack' && atkAngleMap.has(pId))
+        baseA = atkAngleMap.get(pId)
+      else
+        baseA = (2 * Math.PI * i) / Math.max(ipNodes.length, 1) - Math.PI / 2
+
+      n.x = cx + rIp * Math.cos(baseA) + (Math.random() - 0.5) * jitterIp
+      n.y = cy + rIp * Math.sin(baseA) + (Math.random() - 0.5) * jitterIp
+    })
+  }
+
+  // ── Physics ─────────────────────────────────────────
+  _tick () {
+    if (this.alpha < 0.001) return
+    const REP  = this.compact ? 2000 : 3000   // 반발력 ↓ (5000→3000)
+    const K    = this.compact ? 0.06  : 0.055  // 스프링 강성 ↑ (0.035→0.055)
+    const LEN  = this.compact ? 80    : 120    // 자연 길이 ↓ (150→120)
+    const DAMP = 0.78
+
+    this.nodes.forEach(n => { n.fx = 0; n.fy = 0 })
+
+    // Coulomb repulsion
+    for (let i = 0; i < this.nodes.length; i++) {
+      for (let j = i + 1; j < this.nodes.length; j++) {
+        const a = this.nodes[i], b = this.nodes[j]
+        const dx = (b.x - a.x) || 0.1, dy = (b.y - a.y) || 0.1
+        const d2 = Math.max(dx * dx + dy * dy, 1)
+        const d  = Math.sqrt(d2)
+        const f  = REP / d2, fx = f * dx / d, fy = f * dy / d
+        if (!a.fixed) { a.fx -= fx; a.fy -= fy }
+        if (!b.fixed) { b.fx += fx; b.fy += fy }
+      }
+    }
+
+    // Hooke spring (노드 타입 쌍별 자연 길이 조정)
+    for (const e of this.edges) {
+      if (!e.sourceNode || !e.targetNode) continue
+      const a = e.sourceNode, b = e.targetNode
+      const dx = b.x - a.x, dy = b.y - a.y
+      const d  = Math.sqrt(dx * dx + dy * dy) + 0.01
+
+      // server → atk → subnet → ip 계층 스프링
+      const typePair = [a.type, b.type].sort().join('-')
+      let edgeLen = LEN
+      if      (typePair === 'attack-server')  edgeLen = LEN * 0.55  // server ↔ atk
+      else if (typePair === 'attack-subnet')  edgeLen = LEN * 0.55  // atk ↔ subnet
+      else if (typePair === 'attack-ip')      edgeLen = LEN * 0.70  // atk ↔ ip (직접)
+      else if (typePair === 'ip-subnet')      edgeLen = LEN * 0.38  // subnet ↔ ip (짧게)
+
+      const f  = K * (d - edgeLen), fx = f * dx / d, fy = f * dy / d
+      if (!a.fixed) { a.fx += fx; a.fy += fy }
+      if (!b.fixed) { b.fx -= fx; b.fy -= fy }
+    }
+
+    // Centre gravity — 컨테이너가 아직 0×0이면 폴백 중심 사용
+    const cx = (this.W || 800) / 2, cy = (this.H || 600) / 2
+    this.nodes.forEach(n => {
+      if (n.fixed) return
+      n.fx += (cx - n.x) * 0.02   // gravity ↑ (0.01→0.02)
+      n.fy += (cy - n.y) * 0.02
+    })
+
+    // Integrate
+    this.nodes.forEach(n => {
+      if (n.fixed || n === this.dragged) return
+      n.vx = (n.vx + n.fx) * DAMP
+      n.vy = (n.vy + n.fy) * DAMP
+      n.x += n.vx * this.alpha
+      n.y += n.vy * this.alpha
+    })
+    this.alpha *= 0.993
+  }
+
+  // ── Rendering ───────────────────────────────────────
+  _draw () {
+    const ctx = this.canvas.getContext('2d')
+    const dpr = this._dpr
+    ctx.save()
+    ctx.clearRect(0, 0, this.canvas.width, this.canvas.height)
+    ctx.scale(dpr, dpr)
+    ctx.translate(this.pan.x, this.pan.y)
+    ctx.scale(this.scale, this.scale)
+
+    // ── Edges ──
+    for (const e of this.edges) {
+      const a = e.sourceNode, b = e.targetNode
+      if (!a || !b) continue
+      const isMember = e.type === 'member'
+      const hl  = this.selected && (e.sourceNode === this.selected || e.targetNode === this.selected)
+      const dim = !!this.selected && !hl
+      const col = isMember ? '#4d5562' : (ForceGraph.EDGE_COLOR[e.type] || '#555')
+
+      // Bezier offset for parallel edges
+      const dx = b.x - a.x, dy = b.y - a.y
+      const len = Math.sqrt(dx * dx + dy * dy) + 0.01
+      const nx = -dy / len, ny = dx / len
+      const offset = (e._gi - (e._gs - 1) / 2) * 22
+      const cpx = (a.x + b.x) / 2 + nx * offset
+      const cpy = (a.y + b.y) / 2 + ny * offset
+
+      ctx.beginPath()
+      ctx.moveTo(a.x, a.y)
+      ctx.quadraticCurveTo(cpx, cpy, b.x, b.y)
+      ctx.strokeStyle = col
+      ctx.lineWidth   = hl ? 2.2 : (isMember ? 0.7 : 1.2)
+      ctx.globalAlpha = dim ? 0.05 : (hl ? 0.90 : (isMember ? 0.22 : 0.42))
+      ctx.stroke()
+
+      // 엣지 레이블: 공격 유형 중간 노드가 레이블 역할을 하므로
+      // member 엣지·구조 노드(server/attack) 인접 엣지는 레이블 생략
+      const srcType = a.type, tgtType = b.type
+      const skipLabel = isMember
+        || srcType === 'server' || tgtType === 'server'
+        || srcType === 'attack' || tgtType === 'attack'
+      if (!dim && !skipLabel) {
+        const lx = (a.x + b.x) / 4 + cpx / 2
+        const ly = (a.y + b.y) / 4 + cpy / 2
+        const fs = Math.max(7, Math.min(10, 10 / this.scale))
+        ctx.font         = `${fs}px Inter, sans-serif`
+        ctx.fillStyle    = col
+        ctx.globalAlpha  = hl ? 0.9 : 0.35
+        ctx.textAlign    = 'center'
+        ctx.textBaseline = 'bottom'
+        ctx.fillText(ForceGraph.EDGE_LABEL[e.type] || e.type, lx, ly - 2)
+      }
+    }
+    ctx.globalAlpha = 1
+
+    // ── Nodes ──
+    for (const n of this.nodes) {
+      const isSel  = n === this.selected
+      const isHov  = n === this.hovered
+      const connected = this.selected && this.nodeEdges.get(n.id)?.some(
+        e => e.sourceNode === this.selected || e.targetNode === this.selected
+      )
+      const dim = !!this.selected && !isSel && !connected
+
+      ctx.globalAlpha = dim ? 0.15 : 1
+
+      // Glow ring
+      if (isSel || isHov) {
+        ctx.beginPath()
+        ctx.arc(n.x, n.y, n.radius + 8, 0, Math.PI * 2)
+        ctx.fillStyle = n.color + '28'
+        ctx.fill()
+      }
+
+      // Circle
+      ctx.beginPath()
+      ctx.arc(n.x, n.y, n.radius, 0, Math.PI * 2)
+      ctx.fillStyle   = n.color
+      ctx.globalAlpha = dim ? 0.15 : (n.type === 'attack' ? 0.92 : 1)
+      ctx.fill()
+      ctx.strokeStyle = isSel ? '#ffffff'
+        : n.type === 'attack' ? 'rgba(255,255,255,0.55)'
+        : 'rgba(255,255,255,0.22)'
+      ctx.lineWidth   = isSel ? 2.5 : (n.type === 'attack' ? 1.8 : 1)
+      ctx.globalAlpha = dim ? 0.15 : 1
+      ctx.stroke()
+
+      // Icon
+      const iconSz = n.type === 'server' ? 15 : (n.type === 'attack' ? 11 : 9)
+      ctx.font          = `${iconSz}px sans-serif`
+      ctx.textAlign     = 'center'
+      ctx.textBaseline  = 'middle'
+      ctx.fillStyle     = 'rgba(255,255,255,0.92)'
+      let nodeIcon
+      if      (n.type === 'server') nodeIcon = '🖥'
+      else if (n.type === 'attack') nodeIcon = IOC_TAG[n.label]?.icon || '⚡'
+      else if (n.type === 'subnet') nodeIcon = '📡'
+      else                          nodeIcon = n.is_private ? '🏠' : '🌐'
+      ctx.fillText(nodeIcon, n.x, n.y + 1)
+
+      // Label below
+      const ls = Math.max(8, Math.min(11, 10 / this.scale))
+      ctx.font          = `${ls}px "SF Mono", "Fira Code", monospace`
+      ctx.textAlign     = 'center'
+      ctx.textBaseline  = 'top'
+      ctx.globalAlpha   = dim ? 0.12 : 0.88
+      // 공격 유형 노드: 태그 키 대신 한글 이름 표시
+      const displayLabel = n.type === 'attack'
+        ? (IOC_TAG[n.label]?.label || n.label)
+        : n.label
+      ctx.fillStyle = n.type === 'attack' ? (n.color + 'ee') : '#c9d1d9'
+      ctx.fillText(displayLabel, n.x, n.y + n.radius + 4)
+
+      // 서브넷 노드: IP 개수 표시
+      if (n.type === 'subnet' && n.ip_count) {
+        const ls2 = Math.max(7, Math.min(9, 8 / this.scale))
+        ctx.font      = `${ls2}px Inter, sans-serif`
+        ctx.fillStyle = '#8b949e'
+        ctx.fillText(`×${n.ip_count} IPs`, n.x, n.y + n.radius + 4 + ls + 2)
+      }
+
+      ctx.globalAlpha = 1
+    }
+    ctx.restore()
+  }
+
+  // ── Coordinate transforms ────────────────────────────
+  _toGraph (clientX, clientY) {
+    const rect = this.canvas.getBoundingClientRect()
+    return {
+      x: (clientX - rect.left - this.pan.x) / this.scale,
+      y: (clientY - rect.top  - this.pan.y) / this.scale,
+    }
+  }
+
+  _hitTest (gx, gy) {
+    for (let i = this.nodes.length - 1; i >= 0; i--) {
+      const n = this.nodes[i]
+      const dx = n.x - gx, dy = n.y - gy
+      if (dx * dx + dy * dy <= (n.radius + 5) ** 2) return n
+    }
+    return null
+  }
+
+  // ── Public: select node by id ────────────────────────
+  selectNodeById (id) {
+    const n = this.nodeById.get(id)
+    if (n) { this.selected = n; this.onSelect(n) }
+  }
+
+  // ── Auto-fit ────────────────────────────────────────
+  /** 모든 노드가 화면에 들어오도록 scale·pan 자동 조정.
+   *  사용자가 직접 pan/zoom 한 뒤에는 호출하지 않음. */
+  _autoFit (padding = 48) {
+    if (!this.nodes.length || !this.W || !this.H) return
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity
+    for (const n of this.nodes) {
+      minX = Math.min(minX, n.x - n.radius)
+      maxX = Math.max(maxX, n.x + n.radius)
+      minY = Math.min(minY, n.y - n.radius)
+      maxY = Math.max(maxY, n.y + n.radius)
+    }
+    const gW = maxX - minX, gH = maxY - minY
+    if (gW <= 0 || gH <= 0) return
+    const newScale = Math.min(
+      (this.W - padding * 2) / gW,
+      (this.H - padding * 2) / gH,
+      2.5
+    )
+    this.scale = Math.max(newScale, 0.1)
+    this.pan.x = this.W / 2 - ((minX + maxX) / 2) * this.scale
+    this.pan.y = this.H / 2 - ((minY + maxY) / 2) * this.scale
+  }
+
+  // ── Events ──────────────────────────────────────────
+  _bindEvents () {
+    const c = this.canvas
+    let mouseDownX = 0, mouseDownY = 0, didMove = false
+
+    c.addEventListener('mousemove', e => {
+      if (this.dragged) {
+        const g = this._toGraph(e.clientX, e.clientY)
+        this.dragged.x = g.x; this.dragged.y = g.y
+        this.alpha = Math.max(this.alpha, 0.2); return
+      }
+      if (this.isPanning) {
+        this.pan.x += e.clientX - this.panStart.x
+        this.pan.y += e.clientY - this.panStart.y
+        this.panStart = { x: e.clientX, y: e.clientY }; return
+      }
+      const { x, y } = this._toGraph(e.clientX, e.clientY)
+      const hit = this._hitTest(x, y)
+      this.hovered = hit
+      c.style.cursor = hit ? 'pointer' : 'grab'
+      if (hit) {
+        if      (hit.type === 'subnet') this.tooltip.textContent = `${hit.label}  (${hit.ip_count || '?'}개 IP)`
+        else if (hit.type === 'attack') this.tooltip.textContent = `공격 유형: ${IOC_TAG[hit.label]?.label || hit.label}`
+        else                            this.tooltip.textContent = hit.label
+        this.tooltip.classList.add('visible')
+        // position:absolute, container가 relative — 컨테이너 기준 좌표
+        const rect = this.canvas.getBoundingClientRect()
+        let tx = e.clientX - rect.left + 14
+        let ty = e.clientY - rect.top  - 36
+        if (tx + 200 > this.W) tx = e.clientX - rect.left - 208
+        if (ty < 4) ty = e.clientY - rect.top + 16
+        this.tooltip.style.left = tx + 'px'
+        this.tooltip.style.top  = ty + 'px'
+      } else {
+        this.tooltip.classList.remove('visible')
+      }
+    })
+
+    c.addEventListener('mousedown', e => {
+      mouseDownX = e.clientX; mouseDownY = e.clientY; didMove = false
+      const { x, y } = this._toGraph(e.clientX, e.clientY)
+      const hit = this._hitTest(x, y)
+      if (hit && hit.type !== 'server') {
+        this.dragged = hit; hit.fixed = true
+        this._userInteracted = true
+      } else {
+        this.isPanning = true
+        this.panStart  = { x: e.clientX, y: e.clientY }
+        this._userInteracted = true
+      }
+    })
+
+    c.addEventListener('mouseup', e => {
+      const dx = e.clientX - mouseDownX, dy = e.clientY - mouseDownY
+      didMove = Math.sqrt(dx * dx + dy * dy) > 6
+      if (this.dragged) {
+        this.dragged.fixed = false
+        this.dragged.vx = 0; this.dragged.vy = 0
+        if (!didMove) {
+          this.selected = (this.selected === this.dragged) ? null : this.dragged
+          this.onSelect(this.selected)
+        }
+        this.dragged = null
+        this.alpha = Math.max(this.alpha, 0.25)
+      } else if (!didMove) {
+        this.selected = null; this.onSelect(null)
+      }
+      this.isPanning = false
+    })
+
+    c.addEventListener('mouseleave', () => {
+      this.hovered = null
+      this.tooltip.classList.remove('visible')
+      if (this.dragged) { this.dragged.fixed = false; this.dragged = null }
+      this.isPanning = false
+    })
+
+    c.addEventListener('wheel', e => {
+      e.preventDefault()
+      this._userInteracted = true
+      const { x: gx, y: gy } = this._toGraph(e.clientX, e.clientY)
+      const delta    = e.deltaY > 0 ? 0.88 : 1.14
+      const newScale = Math.max(0.15, Math.min(5, this.scale * delta))
+      const rect     = c.getBoundingClientRect()
+      const cx = e.clientX - rect.left
+      const cy = e.clientY - rect.top
+      this.pan.x = cx - gx * newScale
+      this.pan.y = cy - gy * newScale
+      this.scale = newScale
+    }, { passive: false })
+  }
+
+  // ── Animation loop ────────────────────────────────────
+  _startLoop () {
+    let _fitDone = false  // 시뮬레이션 안정 후 1회만 auto-fit
+    const loop = () => {
+      if (this.destroyed) return
+      try {
+        this._tick()
+        // 시뮬레이션이 안정되면 사용자가 조작하지 않은 경우에 한해 auto-fit
+        if (!_fitDone && this.alpha < 0.08 && !this._userInteracted) {
+          this._autoFit()
+          _fitDone = true
+        }
+        this._draw()
+      } catch (err) {
+        console.error('[ForceGraph] render error:', err)
+      }
+      this._frame = requestAnimationFrame(loop)
+    }
+    this._frame = requestAnimationFrame(loop)
+  }
+
+  destroy () {
+    this.destroyed = true
+    if (this._frame)    cancelAnimationFrame(this._frame)
+    if (this._resizeObs) this._resizeObs.disconnect()
+    this.canvas.remove()
+    this.tooltip.remove()
+  }
+}
+
 // ── 이벤트 바인딩 ─────────────────────────────────────
 
 // 탭 바 클릭
@@ -1604,8 +2802,9 @@ elSidebar.addEventListener('click', async e => {
   }
 })
 
-// 테이블 헤더 클릭 → 정렬 토글
+// 테이블 헤더 클릭 → 정렬 토글 (필터 입력 클릭은 무시)
 elDataTable.addEventListener('click', async e => {
+  if (e.target.closest('.col-filter')) return   // 필터 input 클릭 → 정렬 무시
   const th = e.target.closest('th[data-col]')
   if (!th) return
   const col = th.dataset.col
@@ -1618,6 +2817,30 @@ elDataTable.addEventListener('click', async e => {
   }
   currentPage = 0
   await loadData()
+})
+
+// 컬럼 필터 입력 (디바운스 300ms)
+let colFilterTimer = null
+elDataTable.addEventListener('input', e => {
+  const inp = e.target.closest('.col-filter')
+  if (!inp) return
+  const col = inp.dataset.col
+  clearTimeout(colFilterTimer)
+  colFilterTimer = setTimeout(async () => {
+    const val = inp.value
+    if (val && val.trim()) {
+      currentColFilters[col] = val
+      inp.classList.add('active')
+    } else {
+      delete currentColFilters[col]
+      inp.classList.remove('active')
+    }
+    currentPage = 0
+    await loadData()
+    // 페이지 다시 그려도 해당 필터 input에 포커스 유지
+    const restored = elDataTable.querySelector(`.col-filter[data-col="${CSS.escape(col)}"]`)
+    if (restored) { restored.focus(); restored.setSelectionRange(restored.value.length, restored.value.length) }
+  }, 300)
 })
 
 $('btn-open').addEventListener('click', onClickOpen)

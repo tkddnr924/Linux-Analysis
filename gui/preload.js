@@ -61,4 +61,16 @@ contextBridge.exposeInMainWorld('api', {
    * @returns {object[]} IP별 집계 데이터 배열 (스코어링은 렌더러에서 수행)
    */
   getAttackerProfiles: () => ipcRenderer.invoke('db:getAttackerProfiles'),
+
+  /**
+   * 전체 IoC (위협 IP) 수집
+   * @returns {{ ip, sources, threat_tags, first_seen, last_seen }[]}
+   */
+  getIoC: () => ipcRenderer.invoke('db:getIoC'),
+
+  /**
+   * 그래프용 노드+엣지 데이터
+   * @returns {{ nodes: object[], edges: object[] }}
+   */
+  getGraphData: () => ipcRenderer.invoke('db:getGraphData'),
 })

@@ -50,7 +50,8 @@ def ensure_db(conn: sqlite3.Connection):
 def run(dest_conn: sqlite3.Connection, src_conn: sqlite3.Connection):
     ensure_db(dest_conn)
 
-    analyzed_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now = datetime.now()
+    analyzed_at = now.strftime("%Y-%m-%d %H:%M:%S.") + f"{now.microsecond // 1000:03d}"
     rows = []
 
     for log_name, table_name in _LOG_TABLES:
