@@ -1,34 +1,60 @@
 """
-parser/nginxlog.py - nginx access.log 파서
+parser/nginxlog.py - nginx access / error 로그 파서
 
-로그 형식 (Combined Log Format):
+──────────────────────────────────────────
+접근 로그 (NGINX_ACCESS_GLOBS)
+──────────────────────────────────────────
+지원 파일명:
+  access.log*   — 현재 + 로테이션 (access.log.1, access.log.2.gz ...)
+  access_log*   — RHEL 변형
+
+지원 형식 (Combined Log Format):
   IP - user [DD/Mon/YYYY:HH:MM:SS +tz] "METHOD URI PROTO" STATUS BYTES "referer" "UA"
 
 저장 조건:
-  - HTTP 상태코드 2xx (200~299) 만 저장
-  - 분석 목적: 실제로 성공한 요청 중 공격 패턴 탐지
+  - 전체 저장 (상태코드 무관)
 
-저장 테이블: parser.db :: nginx
+──────────────────────────────────────────
+에러 로그 (NGINX_ERROR_GLOBS)
+──────────────────────────────────────────
+지원 파일명:
+  error.log*    — 현재 + 로테이션
+  error_log*    — RHEL 변형
+
+지원 형식:
+  YYYY/MM/DD HH:MM:SS [level] pid#tid: [*cid] message
+
+저장 조건:
+  - 전체 저장 (레벨 무관)
+
+저장 테이블: parser.db :: nginx, nginx_error
 """
 
 import re
 import sqlite3
 from pathlib import Path
-from datetime import datetime
 
-NGINX_LOG_GLOB: str = "access.log*"
-TABLE = "nginx"
+# ── 파일 글로브 ────────────────────────────────────────────────────────────────
 
-# ── 날짜 파싱 ──────────────────────────────────────────
+NGINX_ACCESS_GLOBS: list[str] = ["access.log*", "access_log*"]
+NGINX_ERROR_GLOBS:  list[str] = ["error.log*",  "error_log*"]
+
+TABLE       = "nginx"
+TABLE_ERROR = "nginx_error"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 접근 로그 파싱
+# ─────────────────────────────────────────────────────────────────────────────
+
 _MONTHS = {
     "Jan": "01", "Feb": "02", "Mar": "03", "Apr": "04",
     "May": "05", "Jun": "06", "Jul": "07", "Aug": "08",
     "Sep": "09", "Oct": "10", "Nov": "11", "Dec": "12",
 }
 
-def _parse_datetime(raw: str) -> str:
-    """02/Mar/2026:00:01:57 +0000 → 2026-03-02 00:01:57.000
-    CLF 형식에는 밀리초가 없으므로 .000 을 붙인다."""
+
+def _parse_access_dt(raw: str) -> str:
+    """02/Mar/2026:00:01:57 +0000 → 2026-03-02 00:01:57.000"""
     m = re.match(r'(\d{2})/(\w{3})/(\d{4}):(\d{2}:\d{2}:\d{2})', raw)
     if not m:
         return raw
@@ -36,17 +62,15 @@ def _parse_datetime(raw: str) -> str:
     return f"{year}-{_MONTHS.get(mon, '00')}-{day} {time}.000"
 
 
-# ── 로그 라인 파싱 ─────────────────────────────────────
-# 152.42.255.97 - - [02/Mar/2026:00:01:57 +0000] "GET / HTTP/1.1" 404 134 "-" "UA"
-_LOG_RE = re.compile(
-    r'(?P<src_ip>\S+)'          # IP
-    r' \S+ \S+ '                # ident, auth_user (무시)
-    r'\[(?P<datetime>[^\]]+)\]' # [timestamp]
-    r' "(?P<request>[^"]*)"'    # "METHOD URI PROTO"
-    r' (?P<status>\d{3})'       # 상태코드
-    r' (?P<bytes>\S+)'          # 바이트 (or '-')
-    r'(?: "(?P<referer>[^"]*)")?' # referer (optional)
-    r'(?: "(?P<user_agent>[^"]*)")?' # user_agent (optional)
+_ACCESS_RE = re.compile(
+    r'(?P<src_ip>\S+)'
+    r' \S+ \S+ '
+    r'\[(?P<datetime>[^\]]+)\]'
+    r' "(?P<request>[^"]*)"'
+    r' (?P<status>\d{3})'
+    r' (?P<bytes>\S+)'
+    r'(?: "(?P<referer>[^"]*)")?'
+    r'(?: "(?P<user_agent>[^"]*)")?'
 )
 
 _REQUEST_RE = re.compile(r'^(\S+)\s+(\S+)\s+(\S+)$')
@@ -70,14 +94,15 @@ class NginxLogEntry:
         self.referer    = ""
         self.user_agent = ""
 
-        m = _LOG_RE.match(line)
+        m = _ACCESS_RE.match(line)
         if not m:
             return
 
         self.src_ip     = m.group("src_ip")
-        self.date_time  = _parse_datetime(m.group("datetime"))
+        self.date_time  = _parse_access_dt(m.group("datetime"))
         self.status     = int(m.group("status"))
-        self.bytes_sent = int(m.group("bytes")) if m.group("bytes") != "-" else 0
+        raw_bytes       = m.group("bytes")
+        self.bytes_sent = int(raw_bytes) if raw_bytes and raw_bytes != "-" else 0
         self.referer    = m.group("referer")    or ""
         self.user_agent = m.group("user_agent") or ""
 
@@ -88,7 +113,6 @@ class NginxLogEntry:
             self.uri = m.group("request") or ""
 
 
-# ── DB ────────────────────────────────────────────────
 def ensure_db(conn: sqlite3.Connection):
     conn.execute(f"""
     CREATE TABLE IF NOT EXISTS {TABLE} (
@@ -130,16 +154,115 @@ def insert_rows(conn: sqlite3.Connection, rows: list):
     conn.commit()
 
 
-# ── 파싱 ──────────────────────────────────────────────
 def parse(file_path: Path) -> list[NginxLogEntry]:
-    """2xx 상태코드 라인만 파싱하여 반환"""
+    """접근 로그 전체 파싱 (상태코드 무관)"""
     result = []
     with open(file_path, "r", encoding="utf-8", errors="replace") as f:
         for line in f:
             if not line.strip():
                 continue
             entry = NginxLogEntry(line)
-            # 2xx (200~299) 만 저장
-            if 200 <= entry.status <= 299:
+            if entry.status:
+                result.append(entry)
+    return result
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 에러 로그 파싱
+# ─────────────────────────────────────────────────────────────────────────────
+
+# 2024/01/15 12:34:56 [error] 1234#5678: *90 message ...
+# 2024/01/15 12:34:56 [warn]  1234#5678: message without cid
+_ERROR_RE = re.compile(
+    r'^(?P<datetime>\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2})'
+    r' \[(?P<level>\w+)\]'
+    r' (?P<pid>\d+)#(?P<tid>\d+):'
+    r'(?: \*(?P<cid>\d+))?'
+    r' (?P<message>.+)$'
+)
+
+# "client: IP" 추출 — message 안에 포함될 수 있음
+_CLIENT_RE = re.compile(r'client:\s*([\d.:a-fA-F]+)')
+
+
+def _parse_error_dt(raw: str) -> str:
+    """2024/01/15 12:34:56 → 2024-01-15 12:34:56.000"""
+    return raw.replace("/", "-", 2) + ".000"
+
+
+class NginxErrorEntry:
+    __slots__ = ("date_time", "level", "pid", "tid", "cid", "client_ip", "message", "raw_line")
+
+    def __init__(self, line: str):
+        self.raw_line  = line.rstrip()
+        self.date_time = ""
+        self.level     = ""
+        self.pid       = 0
+        self.tid       = 0
+        self.cid       = 0
+        self.client_ip = ""
+        self.message   = ""
+
+        m = _ERROR_RE.match(line)
+        if not m:
+            return
+
+        self.date_time = _parse_error_dt(m.group("datetime"))
+        self.level     = m.group("level").lower()
+        self.pid       = int(m.group("pid"))
+        self.tid       = int(m.group("tid"))
+        self.cid       = int(m.group("cid")) if m.group("cid") else 0
+        self.message   = m.group("message").strip()
+
+        cm = _CLIENT_RE.search(self.message)
+        if cm:
+            self.client_ip = cm.group(1)
+
+
+def ensure_db_error(conn: sqlite3.Connection):
+    conn.execute(f"""
+    CREATE TABLE IF NOT EXISTS {TABLE_ERROR} (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        date_time  TEXT,
+        level      TEXT,
+        pid        INTEGER,
+        tid        INTEGER,
+        cid        INTEGER,
+        client_ip  TEXT,
+        message    TEXT,
+        raw_line   TEXT
+    )
+    """)
+    conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{TABLE_ERROR}_dt     ON {TABLE_ERROR}(date_time)")
+    conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{TABLE_ERROR}_level  ON {TABLE_ERROR}(level)")
+    conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{TABLE_ERROR}_client ON {TABLE_ERROR}(client_ip)")
+    conn.commit()
+
+
+def to_row_error(entry: NginxErrorEntry) -> tuple:
+    return (
+        entry.date_time, entry.level, entry.pid, entry.tid,
+        entry.cid, entry.client_ip, entry.message, entry.raw_line,
+    )
+
+
+def insert_rows_error(conn: sqlite3.Connection, rows: list):
+    conn.executemany(f"""
+    INSERT INTO {TABLE_ERROR}
+        (date_time, level, pid, tid, cid, client_ip, message, raw_line)
+    VALUES (?,?,?,?,?,?,?,?)
+    """, rows)
+    conn.commit()
+
+
+def parse_error(file_path: Path) -> list[NginxErrorEntry]:
+    """에러 로그 전체 파싱 (레벨 무관)"""
+    result = []
+    with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+        for line in f:
+            if not line.strip():
+                continue
+            entry = NginxErrorEntry(line)
+            if entry.date_time:
                 result.append(entry)
     return result

@@ -56,7 +56,10 @@ class AuditHeader:
 
     _RX = re.compile(r"audit\(([\d.]+):(\d+)\)")
     m = _RX.search(msg)
-
+    if m is None:
+      self.date_time = ""
+      self.sequence  = 0
+      return
     raw = float(m.group(1))
     self.date_time = epoch_to_iso(raw)
     self.sequence = int(m.group(2))
@@ -162,14 +165,6 @@ def ensure_db(conn: sqlite3.Connection):
   conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{TABLE}_dt ON {TABLE}(date_time)")
   conn.commit()
 
-def table_has_data(conn: sqlite3.Connection) -> bool:
-  cur = conn.execute(f"SELECT name FROM sqlite_master WHERE type='table' AND name=?", (TABLE,))
-  row = cur.fetchone()
-  if not row:
-    return False
-  cur = conn.execute(f"SELECT 1 FROM {TABLE} LIMIT 1")
-  return cur.fetchone() is not None
-
 def to_row(audit: AuditLog):
 
   _type = audit.header.type
@@ -239,7 +234,7 @@ def insert_rows(conn: sqlite3.Connection, rows):
 # Parse Log
 def parse(file_path):
   result = []
-  with open(file_path, 'r', encoding='utf-8') as audit_file:
+  with open(file_path, 'r', encoding='utf-8', errors='replace') as audit_file:
     for line in audit_file.readlines():
       audit = AuditLog(line)
       result.append(audit)
@@ -247,5 +242,3 @@ def parse(file_path):
   return result
 
 
-if __name__ == "__main__":
-  print("[INFO] auditlog.py는 라이브러리입니다. main.py를 통해 실행하세요.")

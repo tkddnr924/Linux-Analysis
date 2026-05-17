@@ -1,40 +1,31 @@
-/**
- * main.js — Electron 메인 프로세스
- *
- * - BrowserWindow 생성
- * - better-sqlite3 기반 analysis.db 읽기 (읽기 전용)
- * - IPC 핸들러 등록
- * - 기동 시 ../analysis.db 자동 감지
- */
-
 'use strict'
 
 const { app, BrowserWindow, ipcMain, dialog } = require('electron')
-const path  = require('path')
-const fs    = require('fs')
+const path     = require('path')
+const fs       = require('fs')
 const Database = require('better-sqlite3')
 
 let win = null
 let db  = null
 let currentDbPath = null
 
-// gui/ 의 부모(프로젝트 루트)에 있는 analysis.db 자동 감지
-const AUTO_DB = path.join(__dirname, '..', 'analysis.db')
+// gui/ 의 부모(프로젝트 루트)에 있는 parser.db 자동 감지
+const AUTO_DB = path.join(__dirname, '..', 'parser.db')
 
 // ── 윈도우 생성 ──────────────────────────────────────
 function createWindow () {
   win = new BrowserWindow({
-    width:    1440,
-    height:   900,
-    minWidth: 900,
+    width:     1440,
+    height:    900,
+    minWidth:  900,
     minHeight: 600,
-    backgroundColor: '#0d1117',
+    backgroundColor: '#f0f4f8',
     title: 'Linux Analysis Viewer',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false,           // better-sqlite3 preload 접근 허용
+      sandbox: false,
     },
   })
 
@@ -71,7 +62,7 @@ function openDb (filePath) {
 // ── IPC: 파일 다이얼로그 ─────────────────────────────
 ipcMain.handle('dialog:openFile', async () => {
   const result = await dialog.showOpenDialog(win, {
-    title: 'analysis.db 열기',
+    title: 'parser.db 열기',
     filters: [
       { name: 'SQLite Database', extensions: ['db', 'sqlite', 'sqlite3'] },
       { name: 'All Files',       extensions: ['*'] },
@@ -124,11 +115,16 @@ ipcMain.handle('db:getTables', () => {
   }
 })
 
-// ── IPC: 테이블 데이터 (페이지네이션 + 검색 + 정렬 + 날짜 범위 + 컬럼 필터) ─
-ipcMain.handle('db:getTableData', (_e, { table, search, limit, offset, sortCol, sortDir, dateFrom, dateTo, colFilters }) => {
+// ── IPC: 테이블 데이터 (페이지네이션 + 검색 + 정렬 + 날짜 범위 + 컬럼 필터 + 타입/상태/메서드 필터) ─
+ipcMain.handle('db:getTableData', (_e, { table, search, limit, offset, sortCol, sortDir, dateFrom, dateTo, colFilters, typeFilters, statusFilter, methodFilters }) => {
   if (!db) return { rows: [], total: 0, columns: [] }
   try {
     const cols = db.prepare(`PRAGMA table_info("${table}")`).all().map(r => r.name)
+
+    // 날짜 범위 필터용 타임스탬프 컬럼 탐색
+    const tsCol = cols.includes('date_time') ? 'date_time'
+                : cols.includes('timestamp')  ? 'timestamp'
+                : null
 
     const conditions = []
     const params = []
@@ -137,15 +133,14 @@ ipcMain.handle('db:getTableData', (_e, { table, search, limit, offset, sortCol, 
       conditions.push('(' + cols.map(c => `CAST("${c}" AS TEXT) LIKE ?`).join(' OR ') + ')')
       cols.forEach(() => params.push(`%${search.trim()}%`))
     }
-    if (dateFrom) {
-      conditions.push('"date_time" >= ?')
+    if (tsCol && dateFrom) {
+      conditions.push(`"${tsCol}" >= ?`)
       params.push(dateFrom + ' 00:00:00')
     }
-    if (dateTo) {
-      conditions.push('"date_time" <= ?')
+    if (tsCol && dateTo) {
+      conditions.push(`"${tsCol}" <= ?`)
       params.push(dateTo + ' 23:59:59.999')
     }
-    // 컬럼별 개별 필터 (colFilters: { colName: filterText, ... })
     if (colFilters && typeof colFilters === 'object') {
       for (const [col, val] of Object.entries(colFilters)) {
         if (val && val.trim() && cols.includes(col)) {
@@ -154,10 +149,32 @@ ipcMain.handle('db:getTableData', (_e, { table, search, limit, offset, sortCol, 
         }
       }
     }
+    // 타입 IN 필터 — 'type' / 'event_type' / 'service' 컬럼 자동 탐지
+    if (typeFilters && Array.isArray(typeFilters) && typeFilters.length) {
+      const typeCol = cols.includes('type')       ? 'type'
+                    : cols.includes('event_type') ? 'event_type'
+                    : cols.includes('service')    ? 'service'
+                    : null
+      if (typeCol) {
+        const ph = typeFilters.map(() => '?').join(',')
+        conditions.push(`"${typeCol}" IN (${ph})`)
+        typeFilters.forEach(t => params.push(t))
+      }
+    }
+    // 상태코드 필터 (Apache 등 status 컬럼 보유 테이블)
+    if (statusFilter != null && cols.includes('status')) {
+      conditions.push(`"status" = ?`)
+      params.push(statusFilter)
+    }
+    // 메서드 IN 필터 (Apache 등 method 컬럼 보유 테이블)
+    if (methodFilters && Array.isArray(methodFilters) && methodFilters.length && cols.includes('method')) {
+      const ph = methodFilters.map(() => '?').join(',')
+      conditions.push(`"method" IN (${ph})`)
+      methodFilters.forEach(m => params.push(m))
+    }
 
     const where = conditions.length ? 'WHERE ' + conditions.join(' AND ') : ''
 
-    // ORDER BY: sortCol이 실제 컬럼명인지 검증 후 적용
     let order = ''
     if (sortCol && cols.includes(sortCol)) {
       const dir = sortDir === 'DESC' ? 'DESC' : 'ASC'
@@ -173,78 +190,324 @@ ipcMain.handle('db:getTableData', (_e, { table, search, limit, offset, sortCol, 
   }
 })
 
-// ── IPC: 세션 목록 조회 ───────────────────────────────
-ipcMain.handle('db:getLoginSessions', () => {
-  if (!db) return { sessions: [], has_data: false }
+// ── IPC: 타임스탬프 컬럼 최솟값·최댓값 ──────────────
+ipcMain.handle('db:getDateRange', (_e, table) => {
+  if (!db) return { min: null, max: null }
   try {
-    const exists = db.prepare(
-      "SELECT name FROM sqlite_master WHERE type='table' AND name='authlog_login'"
-    ).get()
-    if (!exists) return { sessions: [], has_data: false }
+    const cols  = db.prepare(`PRAGMA table_info("${table}")`).all().map(r => r.name)
+    const tsCol = cols.includes('date_time') ? 'date_time'
+                : cols.includes('timestamp')  ? 'timestamp'
+                : null
+    if (!tsCol) return { min: null, max: null }
 
-    const sessions = db.prepare(`
-      SELECT id, src_ip, user, auth_method, first_seen, last_seen, count
-      FROM authlog_login
-      WHERE src_ip != '' AND user != ''
-      ORDER BY first_seen ASC
-    `).all()
-    return { sessions, has_data: sessions.length > 0 }
-  } catch { return { sessions: [], has_data: false } }
+    const row = db.prepare(`SELECT MIN("${tsCol}") as mn, MAX("${tsCol}") as mx FROM "${table}"`).get()
+    return {
+      min: row.mn ? row.mn.slice(0, 10) : null,
+      max: row.mx ? row.mx.slice(0, 10) : null,
+    }
+  } catch {
+    return { min: null, max: null }
+  }
 })
 
-// ── IPC: 세션 활동 상세 조회 ─────────────────────────
-ipcMain.handle('db:getSessionActivity', (_e, { user, src_ip, first_seen, last_seen }) => {
-  if (!db) return {}
-  const result = { sudo: [], cmd: [], su: [], bruteforce: [] }
-
-  // sudo 명령 (같은 사용자, 시간 오버랩)
+// ── IPC: sysinfo 테이블 단일 행 ──────────────────────
+ipcMain.handle('db:getSysinfo', () => {
+  if (!db) return null
   try {
-    result.sudo = db.prepare(`
-      SELECT user, command, first_seen, last_seen, count
-      FROM authlog_sudo
-      WHERE user = ?
-        AND last_seen  >= ?
-        AND first_seen <= ?
-      ORDER BY first_seen
-    `).all(user, first_seen, last_seen)
-  } catch {}
+    const exists = db.prepare(
+      "SELECT name FROM sqlite_master WHERE type='table' AND name='sysinfo'"
+    ).get()
+    if (!exists) return null
+    return db.prepare('SELECT * FROM sysinfo LIMIT 1').get() || null
+  } catch { return null }
+})
 
-  // audit 명령 실행 (uid 또는 auid 가 사용자명과 일치, 시간 오버랩)
+// ── IPC: Audit 대시보드 통계 ─────────────────────────
+ipcMain.handle('db:getAuditDashboard', () => {
+  if (!db) return null
   try {
-    result.cmd = db.prepare(`
-      SELECT uid, auid, cmd, cwd, first_seen, last_seen, count
-      FROM audit_cmd
-      WHERE (uid = ? OR auid = ?)
-        AND last_seen  >= ?
-        AND first_seen <= ?
-      ORDER BY first_seen
-      LIMIT 60
-    `).all(user, user, first_seen, last_seen)
-  } catch {}
+    const exists = db.prepare(
+      "SELECT name FROM sqlite_master WHERE type='table' AND name='audit'"
+    ).get()
+    if (!exists) return null
 
-  // 계정 전환 su (같은 사용자, 시간 오버랩)
+    const safe    = sql       => { try { return db.prepare(sql).all()  } catch { return [] } }
+    const safeGet = (sql, ...a) => { try { return db.prepare(sql).get(...a) } catch { return null } }
+
+    // 개요: 총 건수, 기간, 타입 종류
+    const overview = safeGet(
+      "SELECT COUNT(*) as total, MIN(date_time) as first_dt, MAX(date_time) as last_dt, COUNT(DISTINCT type) as type_count FROM audit"
+    )
+
+    // 타입 분포 (상위 20개)
+    const typeDist = safe(
+      "SELECT type, COUNT(*) as cnt FROM audit WHERE type!='' GROUP BY type ORDER BY cnt DESC LIMIT 20"
+    )
+
+    // 인증/로그인 계열 카운트
+    const loginStats = {
+      auth:  safeGet("SELECT COUNT(*) as c FROM audit WHERE type='USER_AUTH'")?.c  ?? 0,
+      login: safeGet("SELECT COUNT(*) as c FROM audit WHERE type='USER_LOGIN'")?.c ?? 0,
+      err:   safeGet("SELECT COUNT(*) as c FROM audit WHERE type='USER_ERR'")?.c   ?? 0,
+      start: safeGet("SELECT COUNT(*) as c FROM audit WHERE type='USER_START'")?.c ?? 0,
+      end:   safeGet("SELECT COUNT(*) as c FROM audit WHERE type='USER_END'")?.c   ?? 0,
+    }
+
+    // 상위 IP (인증 이벤트 기준, IPv6/로컬 제외)
+    const topIPs = safe(`
+      SELECT addr, COUNT(*) as cnt FROM audit
+      WHERE addr NOT IN ('','?') AND addr NOT GLOB '*:*' AND addr!='0.0.0.0'
+        AND type IN ('USER_AUTH','USER_LOGIN','USER_ERR','USER_START')
+      GROUP BY addr ORDER BY cnt DESC LIMIT 5
+    `)
+
+    // 상위 계정
+    const topAccts = safe(`
+      SELECT acct, COUNT(*) as cnt FROM audit
+      WHERE acct != '' AND type IN ('USER_AUTH','USER_LOGIN','USER_ERR')
+      GROUP BY acct ORDER BY cnt DESC LIMIT 5
+    `)
+
+    // 명령 실행
+    const execve  = safeGet("SELECT COUNT(*) as c FROM audit WHERE type='EXECVE'")?.c   ?? 0
+    const userCmd = safeGet("SELECT COUNT(*) as c FROM audit WHERE type='USER_CMD'")?.c ?? 0
+
+    // 상위 실행 파일 (SYSCALL의 exe 기준)
+    const topExe = safe(`
+      SELECT exe, COUNT(*) as cnt FROM audit
+      WHERE exe NOT IN ('','?') AND type='SYSCALL'
+      GROUP BY exe ORDER BY cnt DESC LIMIT 5
+    `)
+
+    // 이상 징후
+    const avcCount    = safeGet("SELECT COUNT(*) as c FROM audit WHERE type='AVC'")?.c          ?? 0
+    const failCount   = safeGet("SELECT COUNT(*) as c FROM audit WHERE body_res='failed'")?.c   ?? 0
+    const syscallFail = safeGet("SELECT COUNT(*) as c FROM audit WHERE type='SYSCALL' AND body_res='no'")?.c ?? 0
+    const userErrIP   = safeGet(`
+      SELECT addr FROM audit
+      WHERE addr NOT IN ('','?') AND type='USER_ERR'
+      GROUP BY addr ORDER BY COUNT(*) DESC LIMIT 1
+    `)?.addr ?? ''
+
+    // 필터용 전체 타입 목록
+    const allTypes = safe(
+      "SELECT type, COUNT(*) as cnt FROM audit WHERE type!='' GROUP BY type ORDER BY cnt DESC"
+    )
+
+    return {
+      overview, typeDist, loginStats,
+      topIPs, topAccts,
+      execve, userCmd, topExe,
+      avcCount, failCount, syscallFail, userErrIP,
+      allTypes,
+    }
+  } catch { return null }
+})
+
+// ── IPC: Authlog 대시보드 통계 ───────────────────────
+ipcMain.handle('db:getAuthlogDashboard', () => {
+  if (!db) return null
   try {
-    result.su = db.prepare(`
-      SELECT from_user, to_user, first_seen, last_seen, count
-      FROM authlog_su
-      WHERE from_user = ?
-        AND last_seen  >= ?
-        AND first_seen <= ?
-      ORDER BY first_seen
-    `).all(user, first_seen, last_seen)
-  } catch {}
+    const exists = db.prepare(
+      "SELECT name FROM sqlite_master WHERE type='table' AND name='authlog'"
+    ).get()
+    if (!exists) return null
 
-  // 동일 IP 브루트포스 기록
+    const safe    = sql => { try { return db.prepare(sql).all()  } catch { return [] } }
+    const safeGet = sql => { try { return db.prepare(sql).get()  } catch { return null } }
+
+    // 개요
+    const overview = safeGet(
+      "SELECT COUNT(*) as total, MIN(date_time) as first_dt, MAX(date_time) as last_dt, COUNT(DISTINCT event_type) as type_count FROM authlog"
+    )
+
+    // 이벤트 타입 분포 (상위 20개)
+    const eventDist = safe(
+      "SELECT event_type as type, COUNT(*) as cnt FROM authlog WHERE event_type!='' GROUP BY event_type ORDER BY cnt DESC LIMIT 20"
+    )
+
+    // SSH 인증 통계
+    const cnt = type => safeGet(`SELECT COUNT(*) as c FROM authlog WHERE event_type='${type}'`)?.c ?? 0
+    const sshStats = {
+      accepted_password:  cnt('sshd_accepted_password'),
+      accepted_publickey: cnt('sshd_accepted_publickey'),
+      failed_password:    cnt('sshd_failed_password'),
+      invalid_user:       cnt('sshd_invalid_user'),
+      max_auth:           cnt('sshd_max_auth'),
+      session_opened:     cnt('sshd_session_opened'),
+    }
+
+    // 공격 IP (실패 로그인 기준 상위 5개)
+    const topAttackIPs = safe(`
+      SELECT src_ip, COUNT(*) as cnt FROM authlog
+      WHERE src_ip != '' AND event_type IN ('sshd_failed_password','sshd_invalid_user','sshd_max_auth')
+      GROUP BY src_ip ORDER BY cnt DESC LIMIT 5
+    `)
+
+    // 성공 로그인 IP
+    const topSuccessIPs = safe(`
+      SELECT src_ip, COUNT(*) as cnt FROM authlog
+      WHERE src_ip != '' AND event_type IN ('sshd_accepted_password','sshd_accepted_publickey')
+      GROUP BY src_ip ORDER BY cnt DESC LIMIT 5
+    `)
+
+    // 성공 로그인 계정
+    const topUsers = safe(`
+      SELECT user, COUNT(*) as cnt FROM authlog
+      WHERE user != '' AND event_type IN ('sshd_accepted_password','sshd_accepted_publickey')
+      GROUP BY user ORDER BY cnt DESC LIMIT 5
+    `)
+
+    // 실패 대상 계정
+    const topFailUsers = safe(`
+      SELECT user, COUNT(*) as cnt FROM authlog
+      WHERE user != '' AND event_type IN ('sshd_failed_password','sshd_invalid_user')
+      GROUP BY user ORDER BY cnt DESC LIMIT 5
+    `)
+
+    // sudo 통계
+    const sudoCount    = cnt('sudo_command')
+    const topSudoUsers = safe(`
+      SELECT user, COUNT(*) as cnt FROM authlog
+      WHERE user != '' AND event_type='sudo_command'
+      GROUP BY user ORDER BY cnt DESC LIMIT 5
+    `)
+
+    // su 횟수
+    const suCount = safeGet(
+      "SELECT COUNT(*) as c FROM authlog WHERE event_type IN ('su_to','su_session_opened')"
+    )?.c ?? 0
+
+    // 필터용 전체 이벤트 타입
+    const allTypes = safe(
+      "SELECT event_type as type, COUNT(*) as cnt FROM authlog WHERE event_type!='' GROUP BY event_type ORDER BY cnt DESC"
+    )
+
+    return {
+      overview, eventDist, sshStats,
+      topAttackIPs, topSuccessIPs, topUsers, topFailUsers,
+      sudoCount, topSudoUsers, suCount,
+      allTypes,
+    }
+  } catch { return null }
+})
+
+// ── IPC: Syslog 대시보드 통계 ───────────────────────
+ipcMain.handle('db:getSyslogDashboard', () => {
+  if (!db) return null
   try {
-    result.bruteforce = db.prepare(`
-      SELECT src_ip, burst_start, burst_end, attempt_count, success_count
-      FROM authlog_bruteforce
-      WHERE src_ip = ?
-      ORDER BY burst_start
-    `).all(src_ip)
-  } catch {}
+    const exists = db.prepare(
+      "SELECT name FROM sqlite_master WHERE type='table' AND name='syslog'"
+    ).get()
+    if (!exists) return null
 
-  return result
+    const safe    = sql       => { try { return db.prepare(sql).all()  } catch { return [] } }
+    const safeGet = (sql, ...a) => { try { return db.prepare(sql).get(...a) } catch { return null } }
+
+    // 개요
+    const overview = safeGet(
+      "SELECT COUNT(*) as total, MIN(timestamp) as first_dt, MAX(timestamp) as last_dt, COUNT(DISTINCT service) as svc_count FROM syslog"
+    )
+
+    // 상위 서비스 (상위 15개, 바차트용)
+    const topServices = safe(
+      "SELECT service, COUNT(*) as cnt FROM syslog WHERE service!='' GROUP BY service ORDER BY cnt DESC LIMIT 15"
+    )
+
+    // 키워드별 오류/경고 카운트 (message LIKE)
+    const errCount   = safeGet("SELECT COUNT(*) as c FROM syslog WHERE message LIKE '%error%'")?.c   ?? 0
+    const warnCount  = safeGet("SELECT COUNT(*) as c FROM syslog WHERE message LIKE '%warn%'")?.c    ?? 0
+    const failCount  = safeGet("SELECT COUNT(*) as c FROM syslog WHERE message LIKE '%fail%'")?.c    ?? 0
+    const critCount  = safeGet("SELECT COUNT(*) as c FROM syslog WHERE message LIKE '%critical%'")?.c ?? 0
+    const killedCount= safeGet("SELECT COUNT(*) as c FROM syslog WHERE message LIKE '%killed%'")?.c  ?? 0
+    const panicCount = safeGet("SELECT COUNT(*) as c FROM syslog WHERE message LIKE '%panic%'")?.c   ?? 0
+
+    // 오류 발생 상위 서비스
+    const topErrServices = safe(
+      "SELECT service, COUNT(*) as cnt FROM syslog WHERE message LIKE '%error%' AND service!='' GROUP BY service ORDER BY cnt DESC LIMIT 6"
+    )
+
+    // 분류별 집계
+    const kernelCount  = safeGet("SELECT COUNT(*) as c FROM syslog WHERE service='kernel'")?.c          ?? 0
+    const systemdCount = safeGet("SELECT COUNT(*) as c FROM syslog WHERE service LIKE 'systemd%'")?.c   ?? 0
+    const sshdCount    = safeGet("SELECT COUNT(*) as c FROM syslog WHERE service='sshd'")?.c            ?? 0
+    const sudoCount    = safeGet("SELECT COUNT(*) as c FROM syslog WHERE service='sudo'")?.c            ?? 0
+    const cronCount    = safeGet("SELECT COUNT(*) as c FROM syslog WHERE service IN ('cron','CRON','crond','anacron')")?.c ?? 0
+    const nmCount      = safeGet("SELECT COUNT(*) as c FROM syslog WHERE service='NetworkManager'")?.c  ?? 0
+
+    // 칩용 전체 서비스 목록
+    const allTypes = safe(
+      "SELECT service as type, COUNT(*) as cnt FROM syslog WHERE service!='' GROUP BY service ORDER BY cnt DESC"
+    )
+
+    return {
+      overview, topServices,
+      errCount, warnCount, failCount, critCount, killedCount, panicCount,
+      topErrServices,
+      kernelCount, systemdCount, sshdCount, sudoCount, cronCount, nmCount,
+      allTypes,
+    }
+  } catch { return null }
+})
+
+// ── IPC: Apache2 대시보드 통계 ──────────────────────
+ipcMain.handle('db:getApache2Dashboard', () => {
+  if (!db) return null
+  try {
+    const exists = db.prepare(
+      "SELECT name FROM sqlite_master WHERE type='table' AND name='apache2'"
+    ).get()
+    if (!exists) return null
+
+    const safe    = sql       => { try { return db.prepare(sql).all()  } catch { return [] } }
+    const safeGet = (sql, ...a) => { try { return db.prepare(sql).get(...a) } catch { return null } }
+
+    // 개요
+    const overview = safeGet(
+      "SELECT COUNT(*) as total, MIN(date_time) as first_dt, MAX(date_time) as last_dt, COUNT(DISTINCT src_ip) as ip_count, COUNT(DISTINCT uri) as uri_count FROM apache2"
+    )
+
+    // 상태코드별 카운트 (상위 20개)
+    const statusDist = safe(
+      "SELECT status, COUNT(*) as cnt FROM apache2 GROUP BY status ORDER BY cnt DESC LIMIT 20"
+    )
+
+    // 상태코드 범주 집계
+    const s2xx = safeGet("SELECT COUNT(*) as c FROM apache2 WHERE status >= 200 AND status < 300")?.c ?? 0
+    const s3xx = safeGet("SELECT COUNT(*) as c FROM apache2 WHERE status >= 300 AND status < 400")?.c ?? 0
+    const s4xx = safeGet("SELECT COUNT(*) as c FROM apache2 WHERE status >= 400 AND status < 500")?.c ?? 0
+    const s5xx = safeGet("SELECT COUNT(*) as c FROM apache2 WHERE status >= 500 AND status < 600")?.c ?? 0
+
+    // 200 응답 메서드 분포
+    const methodDist200 = safe(
+      "SELECT method, COUNT(*) as cnt FROM apache2 WHERE status=200 AND method!='' GROUP BY method ORDER BY cnt DESC"
+    )
+
+    // 200 응답 상위 URI (상위 10개)
+    const topUri200 = safe(
+      "SELECT uri, COUNT(*) as cnt FROM apache2 WHERE status=200 GROUP BY uri ORDER BY cnt DESC LIMIT 10"
+    )
+
+    // 상위 IP (전체 요청 기준 상위 5개)
+    const topIPs = safe(
+      "SELECT src_ip, COUNT(*) as cnt FROM apache2 WHERE src_ip!='' GROUP BY src_ip ORDER BY cnt DESC LIMIT 5"
+    )
+
+    // 오류 상위 IP (4xx/5xx 기준 상위 5개)
+    const topErrIPs = safe(
+      "SELECT src_ip, COUNT(*) as cnt FROM apache2 WHERE status >= 400 AND src_ip!='' GROUP BY src_ip ORDER BY cnt DESC LIMIT 5"
+    )
+
+    // vhost 분포 (복수 vhost가 있을 경우)
+    const vhosts = safe(
+      "SELECT vhost, COUNT(*) as cnt FROM apache2 WHERE vhost!='' GROUP BY vhost ORDER BY cnt DESC LIMIT 10"
+    )
+
+    return {
+      overview, statusDist, s2xx, s3xx, s4xx, s5xx,
+      methodDist200, topUri200, topIPs, topErrIPs, vhosts,
+    }
+  } catch { return null }
 })
 
 // ── IPC: 전체 테이블 통합 검색 ───────────────────────
@@ -273,359 +536,7 @@ ipcMain.handle('db:globalSearch', (_e, query) => {
 
       const rows = db.prepare(`SELECT * FROM "${table}" WHERE ${where} LIMIT 20`).all(...params)
       results.push({ table, columns: cols, rows, total })
-    } catch { /* 테이블 접근 오류 무시 */ }
+    } catch { /* 접근 오류 무시 */ }
   }
   return results
-})
-
-// ── IPC: IP 기반 공격자 종합 프로파일 ────────────────
-/**
- * 분석 DB의 여러 테이블을 src_ip 기준으로 집계하여
- * 공격자 프로파일 배열을 반환한다.
- * 존재하지 않는 테이블은 자동으로 스킵한다.
- */
-ipcMain.handle('db:getAttackerProfiles', () => {
-  if (!db) return []
-
-  // 존재하는 테이블 집합
-  const existingTables = new Set(
-    db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map(r => r.name)
-  )
-  const has  = t => existingTables.has(t)
-  const safe = (sql) => { try { return db.prepare(sql).all() } catch { return [] } }
-
-  const ipMap = new Map()
-  const ensure = ip => {
-    if (!ipMap.has(ip)) ipMap.set(ip, { src_ip: ip })
-    return ipMap.get(ip)
-  }
-
-  // ① 브루트포스 burst 집계
-  if (has('authlog_bruteforce')) {
-    for (const r of safe(`
-      SELECT src_ip,
-        COUNT(*)            AS bf_bursts,
-        SUM(attempt_count)  AS bf_attempts,
-        SUM(success_count)  AS bf_success,
-        MIN(burst_start)    AS bf_first,
-        MAX(burst_end)      AS bf_last
-      FROM authlog_bruteforce
-      WHERE src_ip != ''
-      GROUP BY src_ip
-    `)) Object.assign(ensure(r.src_ip), r)
-  }
-
-  // ② 공격 IP 통계 (authlog_attack_ip)
-  if (has('authlog_attack_ip')) {
-    for (const r of safe(`
-      SELECT src_ip,
-        total_count   AS atk_total,
-        success_count AS atk_success,
-        fail_count    AS atk_fail,
-        first_seen    AS atk_first,
-        last_seen     AS atk_last
-      FROM authlog_attack_ip
-      WHERE src_ip != ''
-    `)) Object.assign(ensure(r.src_ip), r)
-  }
-
-  // ③ SSH 로그인 성공 (authlog_login)
-  if (has('authlog_login')) {
-    for (const r of safe(`
-      SELECT src_ip,
-        COUNT(*)                        AS login_combos,
-        SUM(count)                      AS login_total,
-        GROUP_CONCAT(DISTINCT user)     AS login_users,
-        GROUP_CONCAT(DISTINCT auth_method) AS login_methods,
-        MIN(first_seen)                 AS login_first,
-        MAX(last_seen)                  AS login_last
-      FROM authlog_login
-      WHERE src_ip != ''
-      GROUP BY src_ip
-    `)) Object.assign(ensure(r.src_ip), r)
-  }
-
-  // ④ Nginx 웹 공격
-  if (has('nginx_attack')) {
-    for (const r of safe(`
-      SELECT src_ip,
-        COUNT(*)                           AS natk_count,
-        GROUP_CONCAT(DISTINCT attack_type) AS natk_types,
-        MIN(date_time)                     AS natk_first,
-        MAX(date_time)                     AS natk_last
-      FROM nginx_attack
-      WHERE src_ip IS NOT NULL AND src_ip != ''
-      GROUP BY src_ip
-    `)) Object.assign(ensure(r.src_ip), r)
-  }
-
-  // ⑤ Apache 웹 공격
-  if (has('apache2_attack')) {
-    for (const r of safe(`
-      SELECT src_ip,
-        COUNT(*)                           AS aatk_count,
-        GROUP_CONCAT(DISTINCT attack_type) AS aatk_types,
-        MIN(date_time)                     AS aatk_first,
-        MAX(date_time)                     AS aatk_last
-      FROM apache2_attack
-      WHERE src_ip IS NOT NULL AND src_ip != ''
-      GROUP BY src_ip
-    `)) Object.assign(ensure(r.src_ip), r)
-  }
-
-  // ⑥ Nginx 웹쉘
-  if (has('nginx_webshell')) {
-    for (const r of safe(`
-      SELECT src_ip,
-        COUNT(DISTINCT file_path)      AS ws_files,
-        SUM(access_count)              AS ws_hits,
-        MAX(suspicion_score)           AS ws_score,
-        MIN(first_seen)                AS ws_first,
-        MAX(last_seen)                 AS ws_last,
-        GROUP_CONCAT(DISTINCT file_name) AS ws_names
-      FROM nginx_webshell
-      WHERE src_ip != ''
-      GROUP BY src_ip
-    `)) Object.assign(ensure(r.src_ip), r)
-  }
-
-  // ⑦ Apache 웹쉘
-  if (has('apache2_webshell')) {
-    for (const r of safe(`
-      SELECT src_ip,
-        COUNT(DISTINCT file_path)        AS ws2_files,
-        SUM(access_count)                AS ws2_hits,
-        MAX(suspicion_score)             AS ws2_score,
-        MIN(first_seen)                  AS ws2_first,
-        MAX(last_seen)                   AS ws2_last,
-        GROUP_CONCAT(DISTINCT file_name) AS ws2_names
-      FROM apache2_webshell
-      WHERE src_ip != ''
-      GROUP BY src_ip
-    `)) Object.assign(ensure(r.src_ip), r)
-  }
-
-  // ⑧ UFW 방화벽 차단 — 기존 공격 IP만 보강 (새 IP는 추가하지 않음)
-  if (has('syslog_ufw')) {
-    for (const r of safe(`
-      SELECT src_ip,
-        SUM(count)               AS ufw_blocks,
-        COUNT(DISTINCT dst_port) AS ufw_ports,
-        MIN(first_seen)          AS ufw_first,
-        MAX(last_seen)           AS ufw_last
-      FROM syslog_ufw
-      WHERE src_ip != '' AND src_ip != '0.0.0.0'
-      GROUP BY src_ip
-    `)) {
-      if (ipMap.has(r.src_ip)) Object.assign(ipMap.get(r.src_ip), r)
-    }
-  }
-
-  return Array.from(ipMap.values())
-})
-
-// ── IoC 수집 공통 헬퍼 ────────────────────────────────
-/**
- * DB 에서 모든 위협 IP 를 수집해 Map 으로 반환.
- * { ip → { ip, sources:Set, threat_tags:Set, first_seen, last_seen } }
- */
-function _collectIoC () {
-  const tables = new Set(
-    db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map(r => r.name)
-  )
-  const has  = t => tables.has(t)
-  const safe = sql => { try { return db.prepare(sql).all() } catch { return [] } }
-
-  const ipMap = new Map()
-  const ensure = ip => {
-    if (!ipMap.has(ip)) ipMap.set(ip, { ip, sources: new Set(), threat_tags: new Set(), first_seen: null, last_seen: null })
-    return ipMap.get(ip)
-  }
-  const touch = (e, fs, ls) => {
-    if (fs && (!e.first_seen || fs < e.first_seen)) e.first_seen = fs
-    if (ls && (!e.last_seen  || ls > e.last_seen))  e.last_seen  = ls
-  }
-
-  if (has('authlog_bruteforce')) {
-    for (const r of safe(`SELECT src_ip, MIN(burst_start) fs, MAX(burst_end) ls FROM authlog_bruteforce WHERE src_ip!='' GROUP BY src_ip`)) {
-      const e = ensure(r.src_ip); e.sources.add('authlog_bruteforce'); e.threat_tags.add('brute_force'); touch(e, r.fs, r.ls)
-    }
-  }
-  if (has('authlog_login')) {
-    for (const r of safe(`SELECT src_ip, MIN(first_seen) fs, MAX(last_seen) ls FROM authlog_login WHERE src_ip!='' GROUP BY src_ip`)) {
-      const e = ensure(r.src_ip); e.sources.add('authlog_login'); e.threat_tags.add('ssh_login'); touch(e, r.fs, r.ls)
-    }
-  }
-  if (has('authlog_attack_ip')) {
-    for (const r of safe(`SELECT src_ip, first_seen fs, last_seen ls FROM authlog_attack_ip WHERE src_ip!=''`)) {
-      const e = ensure(r.src_ip); e.sources.add('authlog_attack_ip'); e.threat_tags.add('ssh_attempt'); touch(e, r.fs, r.ls)
-    }
-  }
-  if (has('nginx_attack')) {
-    for (const r of safe(`SELECT src_ip, MIN(date_time) fs, MAX(date_time) ls FROM nginx_attack WHERE src_ip IS NOT NULL AND src_ip!='' GROUP BY src_ip`)) {
-      const e = ensure(r.src_ip); e.sources.add('nginx_attack'); e.threat_tags.add('web_attack'); touch(e, r.fs, r.ls)
-    }
-  }
-  if (has('apache2_attack')) {
-    for (const r of safe(`SELECT src_ip, MIN(date_time) fs, MAX(date_time) ls FROM apache2_attack WHERE src_ip IS NOT NULL AND src_ip!='' GROUP BY src_ip`)) {
-      const e = ensure(r.src_ip); e.sources.add('apache2_attack'); e.threat_tags.add('web_attack'); touch(e, r.fs, r.ls)
-    }
-  }
-  if (has('nginx_webshell')) {
-    for (const r of safe(`SELECT src_ip, MIN(first_seen) fs, MAX(last_seen) ls FROM nginx_webshell WHERE src_ip!='' GROUP BY src_ip`)) {
-      const e = ensure(r.src_ip); e.sources.add('nginx_webshell'); e.threat_tags.add('webshell'); touch(e, r.fs, r.ls)
-    }
-  }
-  if (has('apache2_webshell')) {
-    for (const r of safe(`SELECT src_ip, MIN(first_seen) fs, MAX(last_seen) ls FROM apache2_webshell WHERE src_ip!='' GROUP BY src_ip`)) {
-      const e = ensure(r.src_ip); e.sources.add('apache2_webshell'); e.threat_tags.add('webshell'); touch(e, r.fs, r.ls)
-    }
-  }
-  if (has('syslog_ufw')) {
-    for (const r of safe(`SELECT src_ip, MIN(first_seen) fs, MAX(last_seen) ls FROM syslog_ufw WHERE src_ip!='' AND src_ip!='0.0.0.0' GROUP BY src_ip`)) {
-      const e = ensure(r.src_ip); e.sources.add('syslog_ufw'); e.threat_tags.add('ufw_block'); touch(e, r.fs, r.ls)
-    }
-  }
-  return ipMap
-}
-
-// ── IPC: IoC 목록 (전체 위협 IP 수집) ────────────────
-ipcMain.handle('db:getIoC', () => {
-  if (!db) return []
-  try {
-    const ipMap = _collectIoC()
-    return Array.from(ipMap.values()).map(e => ({
-      ip:          e.ip,
-      sources:     Array.from(e.sources),
-      threat_tags: Array.from(e.threat_tags),
-      first_seen:  e.first_seen,
-      last_seen:   e.last_seen,
-    })).sort((a, b) => (a.first_seen || '') < (b.first_seen || '') ? -1 : 1)
-  } catch { return [] }
-})
-
-// ── IPC: 그래프 데이터 (노드 + 엣지) ─────────────────
-ipcMain.handle('db:getGraphData', () => {
-  if (!db) return { nodes: [], edges: [] }
-  try {
-    // 서버 이름 (info 테이블 있으면 hostname 사용)
-    let serverLabel = '분석 서버'
-    try {
-      const infoExists = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='info'").get()
-      if (infoExists) {
-        const row = db.prepare("SELECT value FROM info WHERE key='hostname' LIMIT 1").get()
-          || db.prepare("SELECT hostname FROM info LIMIT 1").get()
-        if (row) serverLabel = row.value || row.hostname || '분석 서버'
-      }
-    } catch {}
-
-    const ipMap = _collectIoC()
-
-    // ── /24 서브넷 그룹핑 ─────────────────────────────
-    // 동일 /24 서브넷에 2개 이상의 IP → 서브넷 노드 생성
-    const subnetBuckets = new Map()   // prefix → [ip, ...]
-    for (const ip of ipMap.keys()) {
-      const m = ip.match(/^(\d+\.\d+\.\d+)\.\d+$/)
-      if (!m) continue
-      const pfx = m[1]
-      if (!subnetBuckets.has(pfx)) subnetBuckets.set(pfx, [])
-      subnetBuckets.get(pfx).push(ip)
-    }
-
-    // activeSubnets: prefix → { tags:Set, sources:Set, count }
-    const activeSubnets = new Map()
-    for (const [pfx, ips] of subnetBuckets) {
-      if (ips.length < 2) continue
-      const tags = new Set(), sources = new Set()
-      for (const ip of ips) {
-        const e = ipMap.get(ip)
-        if (!e) continue
-        for (const t of e.threat_tags) tags.add(t)
-        for (const s of e.sources)     sources.add(s)
-      }
-      activeSubnets.set(pfx, { tags, sources, count: ips.length })
-    }
-
-    // ── 공격 유형 노드 (atk:*) ────────────────────────
-    // 전체 데이터셋에서 사용된 위협 태그를 수집해 중간 노드로 생성
-    const allTags = new Set()
-    for (const e of ipMap.values())
-      for (const t of e.threat_tags) allTags.add(t)
-
-    // ── 노드/엣지 조립 ────────────────────────────────
-    const nodes = [{ id: 'server', type: 'server', label: serverLabel, threat_tags: [], sources: [] }]
-    const edges = []
-
-    // ① 공격 유형 노드 + server → atk 엣지
-    for (const tag of allTags) {
-      nodes.push({ id: `atk:${tag}`, type: 'attack', label: tag, threat_tags: [tag], sources: [] })
-      edges.push({ source: 'server', target: `atk:${tag}`, type: tag })
-    }
-
-    // ② 서브넷 노드 + atk → subnet 엣지 (태그별 1개)
-    for (const [pfx, { tags, sources, count }] of activeSubnets) {
-      nodes.push({
-        id:          `net:${pfx}`,
-        type:        'subnet',
-        label:       `${pfx}.0/24`,
-        ip_count:    count,
-        threat_tags: Array.from(tags),
-        sources:     Array.from(sources),
-      })
-      const seen = new Set()
-      for (const tag of tags) {
-        if (!seen.has(tag) && allTags.has(tag)) {
-          seen.add(tag)
-          edges.push({ source: `atk:${tag}`, target: `net:${pfx}`, type: tag })
-        }
-      }
-    }
-
-    // ③ IP 노드 + 엣지 (서브넷 안 → subnet→ip 멤버십, 독립 → atk→ip 직접)
-    for (const e of ipMap.values()) {
-      const m       = e.ip.match(/^(\d+\.\d+\.\d+)\.\d+$/)
-      const pfx     = m ? m[1] : null
-      const inSubnet = pfx && activeSubnets.has(pfx)
-
-      nodes.push({
-        id:          `ip:${e.ip}`,
-        type:        'ip',
-        label:       e.ip,
-        threat_tags: Array.from(e.threat_tags),
-        sources:     Array.from(e.sources),
-        first_seen:  e.first_seen,
-        last_seen:   e.last_seen,
-      })
-
-      if (inSubnet) {
-        // 멤버십 엣지: subnet → ip (공격 유형은 atk→subnet에서 이미 표현)
-        edges.push({ source: `net:${pfx}`, target: `ip:${e.ip}`, type: 'member' })
-      } else {
-        // 직접 연결: atk → ip (위협 태그별 1개)
-        const seen = new Set()
-        for (const tag of e.threat_tags) {
-          if (!seen.has(tag)) {
-            seen.add(tag)
-            edges.push({ source: `atk:${tag}`, target: `ip:${e.ip}`, type: tag })
-          }
-        }
-      }
-    }
-
-    return { nodes, edges }
-  } catch { return { nodes: [], edges: [] } }
-})
-
-// ── IPC: 테이블 date_time 컬럼 최솟값·최댓값 ─────────
-ipcMain.handle('db:getDateRange', (_e, table) => {
-  if (!db) return { min: null, max: null }
-  try {
-    const row = db.prepare(`SELECT MIN(date_time) as mn, MAX(date_time) as mx FROM "${table}"`).get()
-    return {
-      min: row.mn ? row.mn.slice(0, 10) : null,
-      max: row.mx ? row.mx.slice(0, 10) : null,
-    }
-  } catch {
-    return { min: null, max: null }
-  }
 })

@@ -74,15 +74,6 @@ def ensure_db(conn: sqlite3.Connection):
     conn.commit()
 
 
-def table_has_data(conn: sqlite3.Connection) -> bool:
-    cur = conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name=?", (TABLE,)
-    )
-    if not cur.fetchone():
-        return False
-    return conn.execute(f"SELECT 1 FROM {TABLE} LIMIT 1").fetchone() is not None
-
-
 def to_row(entry: KernLogEntry) -> tuple:
     return (entry.date_time, entry.hostname, entry.pid, entry.message, entry.raw_line)
 

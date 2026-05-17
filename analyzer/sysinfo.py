@@ -22,7 +22,7 @@ import sqlite3
 from datetime import datetime, timedelta
 from pathlib import Path
 
-TABLE = "info"
+TABLE = "sysinfo"
 
 # 아티팩트 기본 경로
 _VOLATILE    = Path("target/Volatile")

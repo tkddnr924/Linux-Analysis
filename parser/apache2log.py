@@ -21,7 +21,7 @@ vhost 추출 규칙:
   - other_vhosts_access.log                 → 각 라인 접두어에서 추출
 
 저장 조건:
-  - HTTP 2xx (200~299) 만 저장
+  - 전체 저장 (상태코드 무관)
 
 ──────────────────────────────────────────
 에러 로그 (APACHE2_ERROR_GLOBS)
@@ -35,7 +35,7 @@ vhost 추출 규칙:
   - Apache 2.2: [Weekday Mon DD HH:MM:SS YYYY] [level] [client IP] msg
 
 저장 조건:
-  - level: warn / error / crit / alert / emerg (notice·info·debug 제외)
+  - 전체 저장 (레벨 무관)
 
 저장 테이블: parser.db :: apache2, apache2_error
 """
@@ -212,7 +212,7 @@ def insert_rows(conn: sqlite3.Connection, rows: list):
 
 
 def parse(file_path: Path) -> list[Apache2LogEntry]:
-    """2xx 상태코드 라인만 파싱"""
+    """접근 로그 전체 파싱 (상태코드 무관)"""
     default_vhost, vhost_in_line = _vhost_from_path(file_path)
     result = []
     with open(file_path, "r", encoding="utf-8", errors="replace") as f:
@@ -220,7 +220,7 @@ def parse(file_path: Path) -> list[Apache2LogEntry]:
             if not line.strip():
                 continue
             entry = Apache2LogEntry(line, default_vhost, vhost_in_line)
-            if 200 <= entry.status <= 299:
+            if entry.status:
                 result.append(entry)
     return result
 
@@ -298,10 +298,6 @@ class Apache2ErrorEntry:
             self.message   = m.group("message")
 
 
-# warn 이상 레벨만 저장 (notice·info·debug 제외)
-_ERROR_KEEP_LEVELS = {"warn", "error", "crit", "alert", "emerg"}
-
-
 def ensure_db_error(conn: sqlite3.Connection):
     conn.execute(f"""
     CREATE TABLE IF NOT EXISTS {TABLE_ERROR} (
@@ -338,13 +334,13 @@ def insert_rows_error(conn: sqlite3.Connection, rows: list):
 
 
 def parse_error(file_path: Path) -> list[Apache2ErrorEntry]:
-    """warn 이상 레벨 에러 로그 라인만 파싱하여 반환"""
+    """에러 로그 전체 파싱 (레벨 무관)"""
     result = []
     with open(file_path, "r", encoding="utf-8", errors="replace") as f:
         for line in f:
             if not line.strip():
                 continue
             entry = Apache2ErrorEntry(line)
-            if entry.level in _ERROR_KEEP_LEVELS:
+            if entry.date_time:
                 result.append(entry)
     return result

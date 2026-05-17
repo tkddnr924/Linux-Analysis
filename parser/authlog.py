@@ -17,7 +17,9 @@ import sqlite3
 from pathlib import Path
 from datetime import datetime
 
-AUTH_LOG_GLOB: str = "auth.log*"
+AUTH_LOG_GLOB: str  = "auth.log*"   # Debian/Ubuntu: auth.log, auth.log.1 ...
+SECURE_LOG: str     = "secure"      # RHEL/CentOS 현재 파일 (정확한 이름)
+SECURE_LOG_GLOB: str = "secure-*"   # RHEL/CentOS 로테이션: secure-20240101
 TABLE = "authlog"
 
 # ── 포맷 상수 ─────────────────────────────────────────
@@ -308,15 +310,6 @@ def ensure_db(conn: sqlite3.Connection):
     conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{TABLE}_ip   ON {TABLE}(src_ip)")
     conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{TABLE}_user ON {TABLE}(user)")
     conn.commit()
-
-
-def table_has_data(conn: sqlite3.Connection) -> bool:
-    cur = conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name=?", (TABLE,)
-    )
-    if not cur.fetchone():
-        return False
-    return conn.execute(f"SELECT 1 FROM {TABLE} LIMIT 1").fetchone() is not None
 
 
 def to_row(entry: AuthLogEntry) -> tuple:
