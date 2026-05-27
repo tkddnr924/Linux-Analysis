@@ -104,6 +104,25 @@ function debounce(fn, ms) {
 }
 function fmtDt(dt) { return dt ? dt.slice(0,16).replace('T',' ') : '—' }
 
+// 테이블에서 시간 컬럼 자동 탐지 (main.js 의 tsCol 규칙과 동일)
+function detectTsCol(columns) {
+  if (columns.includes('date_time')) return 'date_time'
+  if (columns.includes('timestamp')) return 'timestamp'
+  return null
+}
+
+// 컬럼별 기본 폭(px) — table-layout:fixed 에서 사용
+function defaultColWidth(col) {
+  if (col === 'id') return 64
+  if (['status','pid','tid','cid','bytes_sent','uid','gid'].includes(col)) return 84
+  if (col === 'date_time' || col === 'timestamp') return 165
+  if (['method','level','protocol','severity','facility'].includes(col)) return 92
+  if (['raw_line','message','msg','cmdline','args'].includes(col)) return 460
+  if (['uri','referer','user_agent','exe','command','line'].includes(col)) return 300
+  if (col.endsWith('_ip') || col === 'addr' || col === 'ip') return 132
+  return 150
+}
+
 // ── 초기화 ────────────────────────────────────────────
 async function init() {
   $('btn-open').addEventListener('click', openDb)
@@ -218,14 +237,16 @@ async function selectTable(tableName) {
 
   S.currentTable = tableName
   S.page = 0; S.search = ''; S.sortCol = null; S.sortDir = 'ASC'
-  S.dateFrom = ''; S.dateTo = ''; S.colFilters = {}
+  S.dateFrom = ''; S.dateTo = ''; S.colFilters = {}; S.colWidths = {}
   $('search-input').value = ''
   $('btn-clear').classList.add('hidden')
   $('table-title').textContent = TABLE_META[tableName]?.label || tableName
   $('tl-date-from').value = ''; $('tl-date-to').value = ''
   $('tl-date-clear').classList.add('hidden')
+  $('table-dashboard').innerHTML = ''
   await setupDateFilter(tableName)
   await loadTable()
+  await loadGenericDashboard(tableName)
 }
 
 // ── 일반 테이블 뷰 ────────────────────────────────────
@@ -285,6 +306,75 @@ function clearDateFilter() {
   $('tl-date-clear').classList.add('hidden'); S.page=0; loadTable()
 }
 
+// ── 공통(자동) 대시보드 ───────────────────────────────
+async function loadGenericDashboard(tableName) {
+  const el = $('table-dashboard')
+  if (!el) return
+  if (!S.totalRows) { el.innerHTML = ''; return }   // 빈 탭이면 표시 안 함
+  const data = await window.api.getGenericDashboard(tableName)
+  if (S.currentTable !== tableName) return            // 그새 다른 테이블로 이동
+  renderGenericDashboard(el, data, S.totalRows)
+}
+
+function renderGenericDashboard(el, data, total) {
+  if (!data) { el.innerHTML = ''; return }
+  const { range, breakdowns, scanLimited } = data
+
+  const rangeBlock = (range && (range.min || range.max)) ? `
+    <div class="dsb-sep"></div>
+    <div class="dsb-item dsb-range">
+      <div class="dsb-val" style="font-size:13px">${fmtDt(range.min)}</div>
+      <div class="dsb-key">첫 기록</div>
+    </div>
+    <div class="dsb-arrow">→</div>
+    <div class="dsb-item dsb-range">
+      <div class="dsb-val" style="font-size:13px">${fmtDt(range.max)}</div>
+      <div class="dsb-key">마지막 기록</div>
+    </div>` : ''
+
+  const cards = (breakdowns || []).map(b => {
+    const max = b.items.length ? b.items[0].cnt : 1
+    const rows = b.items.map(it => {
+      const v    = String(it.val ?? '')
+      const disp = v.length > 42 ? v.slice(0, 42) + '…' : v
+      const pct  = Math.round((it.cnt / max) * 100)
+      return `<div class="gd-row" data-col="${esc(b.column)}" data-val="${esc(v)}" title="${esc(v)}  (클릭 → 필터)">
+        <div class="gd-bar" style="width:${pct}%"></div>
+        <span class="gd-val">${esc(disp)}</span>
+        <span class="gd-cnt">${it.cnt.toLocaleString()}</span>
+      </div>`
+    }).join('')
+    return `<div class="dash-card">
+      <div class="dc-title">${esc(b.column)} 상위 ${b.items.length} (클릭 → 필터)</div>
+      <div class="gd-list">${rows}</div>
+    </div>`
+  }).join('')
+
+  el.innerHTML = `
+    <div class="dash-summary-bar">
+      <div class="dsb-item">
+        <div class="dsb-val">${(total || 0).toLocaleString()}</div>
+        <div class="dsb-key">총 건수</div>
+      </div>
+      ${rangeBlock}
+      ${scanLimited ? `<div class="dsb-sep"></div><div class="dsb-item dsb-warn"><div class="dsb-val" style="font-size:12px">대용량</div><div class="dsb-key">집계 일부 생략</div></div>` : ''}
+    </div>
+    ${cards ? `<div class="dash-cards">${cards}</div>` : ''}`
+
+  // 항목 클릭 → 해당 컬럼 '정확히(=)' 필터 토글
+  el.querySelectorAll('.gd-row[data-col]').forEach(row => {
+    row.addEventListener('click', () => {
+      const col   = row.dataset.col
+      const exact = '=' + row.dataset.val
+      if (!S.colFilters) S.colFilters = {}
+      if (S.colFilters[col] === exact) delete S.colFilters[col]
+      else S.colFilters[col] = exact
+      S.page = 0
+      loadTable()
+    })
+  })
+}
+
 // ── 아티팩트 뷰 (대시보드 + 타입 필터 + 테이블) ──────
 async function selectArtifact(tableName) {
   A.currentTable   = tableName
@@ -292,7 +382,7 @@ async function selectArtifact(tableName) {
   A.sortCol        = null; A.sortDir = 'ASC'
   A.typeFilters    = []; A.activeQuickGroup = null
   A.statusFilter   = null; A.methodFilters = []
-  A.colFilters     = {}
+  A.colFilters     = {}; A.colWidths = {}
 
   $('artifact-search').value = ''
   $('artifact-search-clear').classList.add('hidden')
@@ -983,24 +1073,38 @@ function renderTableData(containerId, columns, rows, reloadFn) {
   const focusedCol = prevActive?.classList.contains('col-filter-input')
     ? prevActive.dataset.col : null
 
-  // 헤더 행 1 — 컬럼명 (정렬)
+  // 정렬 표시용 유효 정렬값 (미지정이면 기본=시간 컬럼 ASC, main.js 와 일치)
+  if (!st.colWidths) st.colWidths = {}
+  const effSortCol = st.sortCol || detectTsCol(columns)
+  const effSortDir = st.sortCol ? st.sortDir : 'ASC'
+  const widthOf = col => st.colWidths[col] || defaultColWidth(col)
+
+  // colgroup — 고정 폭 레이아웃
+  let colgroup = '<colgroup>'
+  for (const col of columns) colgroup += `<col style="width:${widthOf(col)}px" />`
+  colgroup += '</colgroup>'
+
+  // 헤더 행 1 — 컬럼명 (정렬 + 리사이즈 핸들)
   let thead = '<thead><tr class="thead-cols">'
   for (const col of columns) {
-    const sorted = st.sortCol === col
-    const arrow  = sorted ? (st.sortDir === 'ASC' ? ' ▲' : ' ▼') : ''
+    const sorted = effSortCol === col
+    const arrow  = sorted ? (effSortDir === 'ASC' ? ' ▲' : ' ▼') : ''
     thead += `<th data-col="${esc(col)}" class="th-sort${sorted?' sorted':''}">
       <span class="th-label">${esc(col)}${arrow}</span>
+      <span class="col-resizer" data-col="${esc(col)}"></span>
     </th>`
   }
   thead += '</tr>'
 
-  // 헤더 행 2 — 컬럼 필터 입력
+  // 헤더 행 2 — 컬럼 필터 입력 (접두어 문법)
   thead += '<tr class="thead-filters">'
   for (const col of columns) {
     const val    = st.colFilters?.[col] ?? ''
     const active = val.trim() ? ' active' : ''
     thead += `<th><input class="col-filter-input${active}" data-col="${esc(col)}"
-      value="${esc(val)}" placeholder="필터..." autocomplete="off" spellcheck="false" /></th>`
+      value="${esc(val)}" placeholder="필터  !제외  =정확히"
+      title="포함: error · 제외: !debug · 정확히: =200 · 공백으로 여러 조건(AND)"
+      autocomplete="off" spellcheck="false" /></th>`
   }
   thead += '</tr></thead>'
 
@@ -1023,15 +1127,43 @@ function renderTableData(containerId, columns, rows, reloadFn) {
 
   const tbl = document.createElement('table')
   tbl.className = 'data-grid'
-  tbl.innerHTML = thead + tbody
+  tbl.innerHTML = colgroup + thead + tbody
 
-  // 정렬 클릭 (th-sort만)
+  // 정렬 클릭 (th-sort만, 리사이즈 핸들 클릭은 제외)
   tbl.querySelectorAll('th.th-sort[data-col]').forEach(th => {
-    th.addEventListener('click', () => {
+    th.addEventListener('click', e => {
+      if (e.target.classList.contains('col-resizer')) return
       const col = th.dataset.col
-      if (st.sortCol === col) st.sortDir = st.sortDir === 'ASC' ? 'DESC' : 'ASC'
+      if (effSortCol === col) { st.sortCol = col; st.sortDir = effSortDir === 'ASC' ? 'DESC' : 'ASC' }
       else { st.sortCol = col; st.sortDir = 'ASC' }
       st.page = 0; reloadFn()
+    })
+  })
+
+  // 컬럼 폭 리사이즈 (col-resizer 드래그)
+  const colEls = () => [...tbl.querySelectorAll('colgroup col')]
+  tbl.querySelectorAll('.col-resizer').forEach(handle => {
+    handle.addEventListener('click', e => e.stopPropagation())
+    handle.addEventListener('mousedown', e => {
+      e.preventDefault(); e.stopPropagation()
+      const col    = handle.dataset.col
+      const th     = handle.closest('th')
+      const colEl  = colEls()[columns.indexOf(col)]
+      const startX = e.clientX
+      const startW = th.offsetWidth
+      document.body.classList.add('col-resizing')
+      const onMove = ev => {
+        const w = Math.max(56, startW + (ev.clientX - startX))
+        if (colEl) colEl.style.width = w + 'px'
+        st.colWidths[col] = w
+      }
+      const onUp = () => {
+        document.removeEventListener('mousemove', onMove)
+        document.removeEventListener('mouseup', onUp)
+        document.body.classList.remove('col-resizing')
+      }
+      document.addEventListener('mousemove', onMove)
+      document.addEventListener('mouseup', onUp)
     })
   })
 

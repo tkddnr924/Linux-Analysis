@@ -57,9 +57,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: electron-win
-          path: |
-            gui/dist/*.exe
-            gui/dist/*.blockmap
+          # portable 타겟 단일 산출물만 (Setup/installer·blockmap 없음)
+          path: gui/dist/*.exe
 
   # ── GitHub Release 자동 생성 ─────────────────────────
   release:

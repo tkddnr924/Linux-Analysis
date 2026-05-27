@@ -483,10 +483,11 @@ html, body {
 }
 
 .data-grid {
-  width: 100%;
+  width: max-content;
+  min-width: 100%;
   border-collapse: collapse;
   font-size: 12.5px;
-  table-layout: auto;
+  table-layout: fixed;   /* colgroup 의 px 폭을 그대로 적용 (리사이즈 가능) */
 }
 
 .data-grid thead {
@@ -496,6 +497,7 @@ html, body {
 }
 
 .data-grid th {
+  position: relative;
   background: var(--surface-2);
   border-bottom: 2px solid var(--border);
   border-right: 1px solid var(--border-light);
@@ -505,6 +507,8 @@ html, body {
   color: var(--text-2);
   text-align: left;
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
   user-select: none;
   cursor: pointer;
 }
@@ -512,6 +516,19 @@ html, body {
 .data-grid th.th-sort:hover     { background: #eef2f9; color: var(--text); }
 .data-grid th.th-sort.sorted    { color: var(--accent); background: var(--accent-light); }
 .data-grid th.th-sort           { cursor: pointer; }
+
+/* 컬럼 폭 리사이즈 핸들 */
+.col-resizer {
+  position: absolute;
+  top: 0; right: 0;
+  width: 7px; height: 100%;
+  cursor: col-resize;
+  user-select: none;
+  z-index: 3;
+}
+.col-resizer:hover { background: var(--accent); opacity: .4; }
+body.col-resizing,
+body.col-resizing * { cursor: col-resize !important; user-select: none !important; }
 
 /* 필터 입력 행 */
 .data-grid .thead-filters th {
@@ -572,6 +589,49 @@ html, body {
 .data-grid tbody tr { cursor: pointer; transition: background .1s; }
 .data-grid tbody tr:nth-child(even) { background: var(--row-alt); }
 .data-grid tbody tr:hover           { background: var(--row-hover); }
+
+/* ── 공통(자동) 대시보드 ──────────────────────────── */
+.table-dashboard:empty { display: none; }
+
+.gd-list { display: flex; flex-direction: column; gap: 2px; }
+.gd-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  overflow: hidden;
+  font-size: 12px;
+}
+.gd-row:hover { background: var(--accent-light); }
+.gd-bar {
+  position: absolute;
+  left: 0; top: 0; bottom: 0;
+  background: var(--accent);
+  opacity: .12;
+  border-radius: 4px;
+  z-index: 0;
+  pointer-events: none;
+}
+.gd-val {
+  position: relative;
+  z-index: 1;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  color: var(--text);
+}
+.gd-cnt {
+  position: relative;
+  z-index: 1;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  color: var(--text-2);
+}
 
 /* ── 페이지네이션 ─────────────────────────────────── */
 .pagination {

@@ -12,6 +12,82 @@ let currentDbPath = null
 // gui/ 의 부모(프로젝트 루트)에 있는 parser.db 자동 감지
 const AUTO_DB = path.join(__dirname, '..', 'parser.db')
 
+// ── 검색/필터 접두어 문법 ────────────────────────────
+//   foo   → 포함  (LIKE %foo%)
+//   !foo  → 제외  (NOT LIKE %foo%)
+//   =foo  → 정확히 (= foo)
+//   공백으로 구분된 여러 토큰은 AND 로 결합
+function parseFilterTokens (raw) {
+  if (raw == null) return []
+  const out = []
+  for (const part of String(raw).trim().split(/\s+/)) {
+    if (!part) continue
+    if (part[0] === '!') { if (part.length > 1) out.push({ op: 'exclude', term: part.slice(1) }) }
+    else if (part[0] === '=') { if (part.length > 1) out.push({ op: 'exact', term: part.slice(1) }) }
+    else out.push({ op: 'contains', term: part })
+  }
+  return out
+}
+
+// 단일 컬럼 조건: 토큰들을 AND 로 묶음
+function buildColumnCondition (col, raw) {
+  const c = `CAST("${col}" AS TEXT)`
+  const clauses = [], params = []
+  for (const t of parseFilterTokens(raw)) {
+    if (t.op === 'exclude') { clauses.push(`${c} NOT LIKE ?`); params.push(`%${t.term}%`) }
+    else if (t.op === 'exact') { clauses.push(`${c} = ?`); params.push(t.term) }
+    else { clauses.push(`${c} LIKE ?`); params.push(`%${t.term}%`) }
+  }
+  return { clause: clauses.length ? clauses.join(' AND ') : '', params }
+}
+
+// 전체 컬럼 검색 조건: 토큰 단위로
+//   포함/정확히 → 컬럼 OR,  제외 → 컬럼 AND(어느 컬럼에도 없음),  토큰끼리 AND
+function buildSearchCondition (cols, raw) {
+  const clauses = [], params = []
+  for (const t of parseFilterTokens(raw)) {
+    if (t.op === 'exclude') {
+      clauses.push('(' + cols.map(c => `CAST("${c}" AS TEXT) NOT LIKE ?`).join(' AND ') + ')')
+      cols.forEach(() => params.push(`%${t.term}%`))
+    } else if (t.op === 'exact') {
+      clauses.push('(' + cols.map(c => `CAST("${c}" AS TEXT) = ?`).join(' OR ') + ')')
+      cols.forEach(() => params.push(t.term))
+    } else {
+      clauses.push('(' + cols.map(c => `CAST("${c}" AS TEXT) LIKE ?`).join(' OR ') + ')')
+      cols.forEach(() => params.push(`%${t.term}%`))
+    }
+  }
+  return { clause: clauses.length ? clauses.join(' AND ') : '', params }
+}
+
+// ── 공통(자동) 대시보드 ──────────────────────────────
+// 집계할 핵심 컬럼 우선순위(존재하는 것 중 앞에서부터 최대 4개)
+const GENERIC_KEY_COLS = [
+  'status', 'level', 'severity', 'event_type', 'type', 'service', 'facility', 'unit',
+  'src_ip', 'client_ip', 'addr', 'ip', 'user', 'acct', 'username', 'method', 'vhost',
+  'exe', 'comm', 'command', 'terminal', 'tty', 'hostname', 'log_type', 'pid',
+]
+// 고-카디널리티/장문이라 집계 제외
+const GENERIC_SKIP_COLS = new Set([
+  'id', 'raw_line', 'message', 'msg', 'uri', 'referer', 'user_agent', 'cmdline', 'args', 'line',
+])
+// 인덱스 없는 컬럼을 GROUP BY 풀스캔하면 대용량에서 UI가 멈추므로,
+// 비인덱스 컬럼 집계는 이 행수 이하에서만 수행
+const GENERIC_SCAN_LIMIT = 2_000_000
+
+// 테이블에 인덱스가 걸린 컬럼 집합
+function indexedColumns (table) {
+  const set = new Set()
+  try {
+    for (const ix of db.prepare(`PRAGMA index_list("${table}")`).all()) {
+      for (const ic of db.prepare(`PRAGMA index_info("${ix.name}")`).all()) {
+        if (ic.name) set.add(ic.name)
+      }
+    }
+  } catch { /* noop */ }
+  return set
+}
+
 // ── 윈도우 생성 ──────────────────────────────────────
 function createWindow () {
   win = new BrowserWindow({
@@ -130,8 +206,8 @@ ipcMain.handle('db:getTableData', (_e, { table, search, limit, offset, sortCol, 
     const params = []
 
     if (search && search.trim()) {
-      conditions.push('(' + cols.map(c => `CAST("${c}" AS TEXT) LIKE ?`).join(' OR ') + ')')
-      cols.forEach(() => params.push(`%${search.trim()}%`))
+      const { clause, params: sp } = buildSearchCondition(cols, search)
+      if (clause) { conditions.push(clause); params.push(...sp) }
     }
     if (tsCol && dateFrom) {
       conditions.push(`"${tsCol}" >= ?`)
@@ -144,8 +220,8 @@ ipcMain.handle('db:getTableData', (_e, { table, search, limit, offset, sortCol, 
     if (colFilters && typeof colFilters === 'object') {
       for (const [col, val] of Object.entries(colFilters)) {
         if (val && val.trim() && cols.includes(col)) {
-          conditions.push(`CAST("${col}" AS TEXT) LIKE ?`)
-          params.push(`%${val.trim()}%`)
+          const { clause, params: cp } = buildColumnCondition(col, val)
+          if (clause) { conditions.push(clause); params.push(...cp) }
         }
       }
     }
@@ -179,6 +255,9 @@ ipcMain.handle('db:getTableData', (_e, { table, search, limit, offset, sortCol, 
     if (sortCol && cols.includes(sortCol)) {
       const dir = sortDir === 'DESC' ? 'DESC' : 'ASC'
       order = `ORDER BY "${sortCol}" ${dir}`
+    } else if (tsCol) {
+      // 기본 정렬: 시간 컬럼 오래된순(ASC)
+      order = `ORDER BY "${tsCol}" ASC`
     }
 
     const total = db.prepare(`SELECT COUNT(*) as c FROM "${table}" ${where}`).get(...params).c
@@ -510,6 +589,51 @@ ipcMain.handle('db:getApache2Dashboard', () => {
   } catch { return null }
 })
 
+// ── IPC: 공통(자동) 대시보드 ─────────────────────────
+// 전용 대시보드가 없는 테이블용. 기간 + 핵심 컬럼 Top-N 자동 집계.
+// 총 건수는 렌더러가 이미 보유(getTableData total)하므로 여기서 COUNT 재실행하지 않음.
+ipcMain.handle('db:getGenericDashboard', (_e, table) => {
+  if (!db) return null
+  try {
+    const cols = db.prepare(`PRAGMA table_info("${table}")`).all().map(r => r.name)
+    if (!cols.length) return null
+
+    const safeGet = (sql, ...a) => { try { return db.prepare(sql).get(...a) } catch { return null } }
+    const safeAll = (sql, ...a) => { try { return db.prepare(sql).all(...a) } catch { return [] } }
+
+    const tsCol = cols.includes('date_time') ? 'date_time'
+                : cols.includes('timestamp')  ? 'timestamp'
+                : null
+
+    const idxCols   = indexedColumns(table)
+    // 대용량 비인덱스 풀스캔 회피용 행수 추정(인덱스/통계 없이 빠른 상한 확인)
+    const probe     = safeGet(`SELECT COUNT(*) AS c FROM (SELECT 1 FROM "${table}" LIMIT ${GENERIC_SCAN_LIMIT + 1})`)
+    const allowScan = (probe?.c ?? 0) <= GENERIC_SCAN_LIMIT
+
+    let range = { min: null, max: null }
+    if (tsCol && (idxCols.has(tsCol) || allowScan)) {
+      const r = safeGet(`SELECT MIN("${tsCol}") AS mn, MAX("${tsCol}") AS mx FROM "${table}"`)
+      if (r) range = { min: r.mn, max: r.mx }
+    }
+
+    const keyCols = GENERIC_KEY_COLS
+      .filter(c => cols.includes(c) && !GENERIC_SKIP_COLS.has(c))
+      .filter(c => idxCols.has(c) || allowScan)
+      .slice(0, 4)
+
+    const breakdowns = keyCols.map(col => ({
+      column: col,
+      items: safeAll(
+        `SELECT "${col}" AS val, COUNT(*) AS cnt FROM "${table}"
+         WHERE "${col}" IS NOT NULL AND CAST("${col}" AS TEXT) != ''
+         GROUP BY "${col}" ORDER BY cnt DESC LIMIT 8`
+      ),
+    })).filter(b => b.items.length)
+
+    return { table, tsCol, range, breakdowns, scanLimited: !allowScan }
+  } catch { return null }
+})
+
 // ── IPC: 전체 테이블 통합 검색 ───────────────────────
 ipcMain.handle('db:globalSearch', (_e, query) => {
   if (!db || !query || !query.trim()) return []
@@ -528,8 +652,9 @@ ipcMain.handle('db:globalSearch', (_e, query) => {
       const cols = db.prepare(`PRAGMA table_info("${table}")`).all().map(r => r.name)
       if (!cols.length) continue
 
-      const where  = '(' + cols.map(c => `CAST("${c}" AS TEXT) LIKE ?`).join(' OR ') + ')'
-      const params = cols.map(() => `%${q}%`)
+      const { clause, params } = buildSearchCondition(cols, q)
+      if (!clause) continue
+      const where = clause
 
       const total = db.prepare(`SELECT COUNT(*) as c FROM "${table}" WHERE ${where}`).get(...params).c
       if (total === 0) continue

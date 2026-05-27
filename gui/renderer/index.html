@@ -81,7 +81,9 @@
           <div class="toolbar-right">
             <div class="search-wrap">
               <input id="artifact-search" class="search-input" type="text"
-                     placeholder="검색..." autocomplete="off" spellcheck="false" />
+                     placeholder="검색  (예: error  !debug  =200)"
+                     title="포함: error · 제외: !debug · 정확히: =200 · 공백으로 여러 조건(AND)"
+                     autocomplete="off" spellcheck="false" />
               <button id="artifact-search-clear" class="btn-icon hidden">×</button>
             </div>
           </div>
@@ -113,6 +115,9 @@
       <!-- 일반 테이블 뷰 -->
       <div id="table-view" class="table-view hidden">
 
+        <!-- 공통(자동) 대시보드 -->
+        <div id="table-dashboard" class="artifact-dashboard table-dashboard"></div>
+
         <!-- 툴바 -->
         <div class="toolbar">
           <div class="toolbar-left">
@@ -131,7 +136,9 @@
           <div class="toolbar-right">
             <div class="search-wrap">
               <input id="search-input" class="search-input" type="text"
-                     placeholder="검색..." autocomplete="off" spellcheck="false" />
+                     placeholder="검색  (예: error  !debug  =200)"
+                     title="포함: error · 제외: !debug · 정확히: =200 · 공백으로 여러 조건(AND)"
+                     autocomplete="off" spellcheck="false" />
               <button id="btn-clear" class="btn-icon hidden">×</button>
             </div>
           </div>
