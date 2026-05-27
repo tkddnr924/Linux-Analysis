@@ -84,21 +84,29 @@ LOG_TARGETS = [
                                   syslogmod.MESSAGES_LOG,
                                   syslogmod.MESSAGES_LOG_GLOB], "module": syslogmod},
     # apache2 접근 로그: *access.log* / *access_log*
-    {"name": "apache2", "globs": apache2log.APACHE2_ACCESS_GLOBS, "module": apache2log},
+    {"name": "apache2", "globs": apache2log.APACHE2_ACCESS_GLOBS, "module": apache2log,
+     "defer_commit":      True,
+     "ensure_indexes_fn": apache2log.ensure_indexes},
     # apache2 에러 로그: *error.log* / *error_log*
     {"name": "apache2_error", "globs": apache2log.APACHE2_ERROR_GLOBS, "module": apache2log,
-     "parse_fn":      apache2log.parse_error,
-     "to_row_fn":     apache2log.to_row_error,
-     "insert_fn":     apache2log.insert_rows_error,
-     "ensure_db_fn":  apache2log.ensure_db_error},
+     "parse_fn":          apache2log.parse_error,
+     "to_row_fn":         apache2log.to_row_error,
+     "insert_fn":         apache2log.insert_rows_error,
+     "ensure_db_fn":      apache2log.ensure_db_error,
+     "defer_commit":      True,
+     "ensure_indexes_fn": apache2log.ensure_indexes_error},
     # nginx 접근 로그: access.log* / access_log*
-    {"name": "nginx", "globs": nginxlog.NGINX_ACCESS_GLOBS, "module": nginxlog},
+    {"name": "nginx", "globs": nginxlog.NGINX_ACCESS_GLOBS, "module": nginxlog,
+     "defer_commit":      True,
+     "ensure_indexes_fn": nginxlog.ensure_indexes},
     # nginx 에러 로그: error.log* / error_log*
     {"name": "nginx_error", "globs": nginxlog.NGINX_ERROR_GLOBS, "module": nginxlog,
-     "parse_fn":     nginxlog.parse_error,
-     "to_row_fn":    nginxlog.to_row_error,
-     "insert_fn":    nginxlog.insert_rows_error,
-     "ensure_db_fn": nginxlog.ensure_db_error},
+     "parse_fn":          nginxlog.parse_error,
+     "to_row_fn":         nginxlog.to_row_error,
+     "insert_fn":         nginxlog.insert_rows_error,
+     "ensure_db_fn":      nginxlog.ensure_db_error,
+     "defer_commit":      True,
+     "ensure_indexes_fn": nginxlog.ensure_indexes_error},
     # kern.log: Debian ISO 8601 커널 메시지
     {"name": "kernlog", "glob": kernlog.KERN_LOG_GLOB, "module": kernlog},
     # MySQL General Query Log: query.log*
@@ -179,6 +187,26 @@ def cleanup_decomp():
         shutil.rmtree(DECOMP_DIR)
 
 
+# 대량 삽입 동안 한 트랜잭션에 묶을 행 수. WAL 크기를 제한하면서
+# commit(=fsync) 횟수를 (기존 1,000행마다 → 10만 행마다)로 대폭 줄임.
+COMMIT_EVERY = 100_000
+
+
+def _tune_connection(conn: sqlite3.Connection):
+    """
+    대량 삽입용 PRAGMA 튜닝.
+      - WAL          : 쓰기/읽기 동시성↑, 롤백 저널 대비 빠름
+      - synchronous=NORMAL : WAL과 함께 쓰면 충돌 안전성 유지하며 fsync 감소
+      - cache_size   : 256MB 페이지 캐시 (음수 = KiB 단위)
+      - temp_store   : 임시 B-tree/정렬을 메모리에 둠
+    DB·연결 레벨 설정이라 모든 파서에 공통 이득 (파싱 로직은 불변).
+    """
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA cache_size=-262144")   # 256 MiB
+    conn.execute("PRAGMA temp_store=MEMORY")
+
+
 # ── 파싱 ──────────────────────────────────────────────
 def scan(base: Path) -> dict:
     found = {}
@@ -219,6 +247,7 @@ def parse_logs():
 
     PARSER_DB.touch(exist_ok=True)
     conn = sqlite3.connect(PARSER_DB)
+    _tune_connection(conn)
     ensure_info_table(conn)
 
     try:
@@ -254,10 +283,13 @@ def _process_parse(conn: sqlite3.Connection, name: str, files: list[Path], mod,
     ensure_db_fn = target.get("ensure_db_fn", mod.ensure_db) if target else mod.ensure_db
     ensure_db_fn(conn)
 
-    target    = target or {}
-    parse_fn  = target["parse_fn"]  if "parse_fn"  in target else mod.parse
-    to_row_fn = target["to_row_fn"] if "to_row_fn" in target else mod.to_row
-    insert_fn = target["insert_fn"] if "insert_fn" in target else mod.insert_rows
+    target       = target or {}
+    parse_fn     = target["parse_fn"]  if "parse_fn"  in target else mod.parse
+    to_row_fn    = target["to_row_fn"] if "to_row_fn" in target else mod.to_row
+    insert_fn    = target["insert_fn"] if "insert_fn" in target else mod.insert_rows
+    # 웹 로그 등 insert_fn이 스스로 commit하지 않는 파서: 여기서 주기적으로 묶어 커밋
+    defer_commit      = bool(target.get("defer_commit"))
+    ensure_indexes_fn = target.get("ensure_indexes_fn")
 
     total = 0
     for f in files:
@@ -275,6 +307,7 @@ def _process_parse(conn: sqlite3.Connection, name: str, files: list[Path], mod,
 
         try:
             batch = []
+            since_commit = 0
             parse_kwargs = {}
             if name in ("authlog", "syslog", "cron"):
                 parse_kwargs["file_mtime"] = file_mtime
@@ -283,16 +316,29 @@ def _process_parse(conn: sqlite3.Connection, name: str, files: list[Path], mod,
                 batch.append(to_row_fn(entry))
                 if len(batch) >= 1000:
                     insert_fn(conn, batch)
-                    total += len(batch)
+                    total        += len(batch)
+                    since_commit += len(batch)
                     batch.clear()
+                    # WAL이 무한정 커지지 않도록 일정 행마다 한 번씩만 커밋
+                    if defer_commit and since_commit >= COMMIT_EVERY:
+                        conn.commit()
+                        since_commit = 0
             if batch:
                 insert_fn(conn, batch)
                 total += len(batch)
 
+            # 파일 단위로 info 기록 + 커밋(남은 미커밋 행까지 함께 flush)
             insert_info(conn, f, checksum, name)
 
         except Exception as e:
+            # 이 파일에서 아직 커밋되지 않은 부분 삽입은 폐기
+            conn.rollback()
             print(f"  [WARN] {f.name}: {e}")
+
+    # 대량 삽입이 모두 끝난 뒤 인덱스를 1회 구축 (삽입 중 B-tree 갱신 비용 제거)
+    if ensure_indexes_fn:
+        print(f"  [INDEX] {name} 인덱스 생성 중...")
+        ensure_indexes_fn(conn)
 
     print(f"[{name.upper()}] {total}건 신규 저장 완료")
 

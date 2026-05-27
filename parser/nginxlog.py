@@ -33,6 +33,7 @@ parser/nginxlog.py - nginx access / error 로그 파서
 import re
 import sqlite3
 from pathlib import Path
+from typing import Iterator
 
 # ── 파일 글로브 ────────────────────────────────────────────────────────────────
 
@@ -114,6 +115,7 @@ class NginxLogEntry:
 
 
 def ensure_db(conn: sqlite3.Connection):
+    """테이블만 생성. 인덱스는 대량 삽입 후 ensure_indexes()로 1회 구축."""
     conn.execute(f"""
     CREATE TABLE IF NOT EXISTS {TABLE} (
         id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -129,6 +131,11 @@ def ensure_db(conn: sqlite3.Connection):
         raw_line    TEXT
     )
     """)
+    conn.commit()
+
+
+def ensure_indexes(conn: sqlite3.Connection):
+    """대량 삽입 완료 후 1회 호출 — 인덱스를 한 번에 구축."""
     conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{TABLE}_dt     ON {TABLE}(date_time)")
     conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{TABLE}_ip     ON {TABLE}(src_ip)")
     conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{TABLE}_status ON {TABLE}(status)")
@@ -145,26 +152,24 @@ def to_row(entry: NginxLogEntry) -> tuple:
 
 
 def insert_rows(conn: sqlite3.Connection, rows: list):
+    # commit 없음 — 호출측(main.py)에서 주기적으로/파일 단위로 커밋
     conn.executemany(f"""
     INSERT INTO {TABLE}
         (date_time, src_ip, method, uri, protocol, status, bytes_sent,
          referer, user_agent, raw_line)
     VALUES (?,?,?,?,?,?,?,?,?,?)
     """, rows)
-    conn.commit()
 
 
-def parse(file_path: Path) -> list[NginxLogEntry]:
-    """접근 로그 전체 파싱 (상태코드 무관)"""
-    result = []
+def parse(file_path: Path) -> Iterator[NginxLogEntry]:
+    """접근 로그 스트리밍 파싱 (상태코드 무관). 한 줄씩 yield → 메모리 상수."""
     with open(file_path, "r", encoding="utf-8", errors="replace") as f:
         for line in f:
             if not line.strip():
                 continue
             entry = NginxLogEntry(line)
             if entry.status:
-                result.append(entry)
-    return result
+                yield entry
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -220,6 +225,7 @@ class NginxErrorEntry:
 
 
 def ensure_db_error(conn: sqlite3.Connection):
+    """테이블만 생성. 인덱스는 ensure_indexes_error()로 후행 구축."""
     conn.execute(f"""
     CREATE TABLE IF NOT EXISTS {TABLE_ERROR} (
         id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -233,6 +239,11 @@ def ensure_db_error(conn: sqlite3.Connection):
         raw_line   TEXT
     )
     """)
+    conn.commit()
+
+
+def ensure_indexes_error(conn: sqlite3.Connection):
+    """대량 삽입 완료 후 1회 호출."""
     conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{TABLE_ERROR}_dt     ON {TABLE_ERROR}(date_time)")
     conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{TABLE_ERROR}_level  ON {TABLE_ERROR}(level)")
     conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{TABLE_ERROR}_client ON {TABLE_ERROR}(client_ip)")
@@ -247,22 +258,20 @@ def to_row_error(entry: NginxErrorEntry) -> tuple:
 
 
 def insert_rows_error(conn: sqlite3.Connection, rows: list):
+    # commit 없음 — 호출측에서 커밋
     conn.executemany(f"""
     INSERT INTO {TABLE_ERROR}
         (date_time, level, pid, tid, cid, client_ip, message, raw_line)
     VALUES (?,?,?,?,?,?,?,?)
     """, rows)
-    conn.commit()
 
 
-def parse_error(file_path: Path) -> list[NginxErrorEntry]:
-    """에러 로그 전체 파싱 (레벨 무관)"""
-    result = []
+def parse_error(file_path: Path) -> Iterator[NginxErrorEntry]:
+    """에러 로그 스트리밍 파싱 (레벨 무관). 한 줄씩 yield."""
     with open(file_path, "r", encoding="utf-8", errors="replace") as f:
         for line in f:
             if not line.strip():
                 continue
             entry = NginxErrorEntry(line)
             if entry.date_time:
-                result.append(entry)
-    return result
+                yield entry

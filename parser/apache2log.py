@@ -43,6 +43,7 @@ vhost 추출 규칙:
 import re
 import sqlite3
 from pathlib import Path
+from typing import Iterator
 
 # ── 파일 글로브 ───────────────────────────────────────
 APACHE2_ACCESS_GLOBS: list[str] = ["*access.log*", "*access_log*"]
@@ -168,6 +169,7 @@ class Apache2LogEntry:
 
 
 def ensure_db(conn: sqlite3.Connection):
+    """테이블만 생성. 인덱스는 대량 삽입 후 ensure_indexes()로 1회 구축."""
     conn.execute(f"""
     CREATE TABLE IF NOT EXISTS {TABLE} (
         id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -184,6 +186,11 @@ def ensure_db(conn: sqlite3.Connection):
         raw_line    TEXT
     )
     """)
+    conn.commit()
+
+
+def ensure_indexes(conn: sqlite3.Connection):
+    """대량 삽입 완료 후 1회 호출 — 인덱스를 한 번에 구축(삽입 중 B-tree 갱신 비용 제거)."""
     conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{TABLE}_dt     ON {TABLE}(date_time)")
     conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{TABLE}_ip     ON {TABLE}(src_ip)")
     conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{TABLE}_status ON {TABLE}(status)")
@@ -202,27 +209,25 @@ def to_row(entry: Apache2LogEntry) -> tuple:
 
 
 def insert_rows(conn: sqlite3.Connection, rows: list):
+    # commit 없음 — 트랜잭션 커밋은 호출측(main.py)에서 주기적으로/파일 단위로 수행
     conn.executemany(f"""
     INSERT INTO {TABLE}
         (date_time, vhost, src_ip, method, uri, protocol,
          status, bytes_sent, referer, user_agent, raw_line)
     VALUES (?,?,?,?,?,?,?,?,?,?,?)
     """, rows)
-    conn.commit()
 
 
-def parse(file_path: Path) -> list[Apache2LogEntry]:
-    """접근 로그 전체 파싱 (상태코드 무관)"""
+def parse(file_path: Path) -> Iterator[Apache2LogEntry]:
+    """접근 로그 스트리밍 파싱 (상태코드 무관). 한 줄씩 yield → 메모리 상수."""
     default_vhost, vhost_in_line = _vhost_from_path(file_path)
-    result = []
     with open(file_path, "r", encoding="utf-8", errors="replace") as f:
         for line in f:
             if not line.strip():
                 continue
             entry = Apache2LogEntry(line, default_vhost, vhost_in_line)
             if entry.status:
-                result.append(entry)
-    return result
+                yield entry
 
 
 # ─────────────────────────────────────────────────────
@@ -299,6 +304,7 @@ class Apache2ErrorEntry:
 
 
 def ensure_db_error(conn: sqlite3.Connection):
+    """테이블만 생성. 인덱스는 ensure_indexes_error()로 후행 구축."""
     conn.execute(f"""
     CREATE TABLE IF NOT EXISTS {TABLE_ERROR} (
         id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -311,6 +317,11 @@ def ensure_db_error(conn: sqlite3.Connection):
         raw_line   TEXT
     )
     """)
+    conn.commit()
+
+
+def ensure_indexes_error(conn: sqlite3.Connection):
+    """대량 삽입 완료 후 1회 호출."""
     conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{TABLE_ERROR}_dt     ON {TABLE_ERROR}(date_time)")
     conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{TABLE_ERROR}_level  ON {TABLE_ERROR}(level)")
     conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{TABLE_ERROR}_client ON {TABLE_ERROR}(client_ip)")
@@ -325,22 +336,20 @@ def to_row_error(entry: Apache2ErrorEntry) -> tuple:
 
 
 def insert_rows_error(conn: sqlite3.Connection, rows: list):
+    # commit 없음 — 호출측에서 커밋
     conn.executemany(f"""
     INSERT INTO {TABLE_ERROR}
         (date_time, level, module, pid, client_ip, message, raw_line)
     VALUES (?,?,?,?,?,?,?)
     """, rows)
-    conn.commit()
 
 
-def parse_error(file_path: Path) -> list[Apache2ErrorEntry]:
-    """에러 로그 전체 파싱 (레벨 무관)"""
-    result = []
+def parse_error(file_path: Path) -> Iterator[Apache2ErrorEntry]:
+    """에러 로그 스트리밍 파싱 (레벨 무관). 한 줄씩 yield."""
     with open(file_path, "r", encoding="utf-8", errors="replace") as f:
         for line in f:
             if not line.strip():
                 continue
             entry = Apache2ErrorEntry(line)
             if entry.date_time:
-                result.append(entry)
-    return result
+                yield entry
