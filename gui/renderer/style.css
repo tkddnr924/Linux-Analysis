@@ -702,6 +702,7 @@ body.col-resizing * { cursor: col-resize !important; user-select: none !importan
   border-bottom: 1px solid var(--border);
 }
 .modal-title { font-weight: 700; font-size: 14px; color: var(--text); }
+.modal-hint  { font-size: 11px; color: var(--text-muted); margin-left: 10px; flex: 1; }
 .modal-close {
   background: none;
   border: none;
@@ -743,6 +744,81 @@ body.col-resizing * { cursor: col-resize !important; user-select: none !importan
   color: var(--text);
   word-break: break-all;
   white-space: pre-wrap;
+}
+
+/* ── 디코드 팝업 (모달 내 텍스트 선택 시) ───────────── */
+.decode-popup {
+  position: fixed;
+  z-index: 700;                /* 모달(500) 위 */
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-lg);
+  padding: 6px;
+  font-size: 12px;
+  min-width: 280px;
+  max-width: 460px;
+}
+.dp-buttons {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.dp-btn {
+  padding: 5px 10px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--surface-2);
+  color: var(--text);
+  cursor: pointer;
+  font-size: 11.5px;
+  font-family: var(--font-base);
+  white-space: nowrap;
+  transition: background .12s, border-color .12s, color .12s;
+}
+.dp-btn:hover { background: var(--accent-light); border-color: var(--accent); color: var(--accent-hover); }
+.dp-btn-ghost { background: transparent; }
+.dp-btn-close {
+  margin-left: auto;
+  padding: 4px 8px;
+  background: transparent;
+  border-color: transparent;
+  color: var(--text-muted);
+  font-size: 14px;
+  line-height: 1;
+}
+.dp-btn-close:hover { color: var(--danger); background: var(--danger-light); border-color: transparent; }
+.dp-btn-sm { padding: 2px 8px; font-size: 11px; }
+
+.dp-result {
+  margin-top: 6px;
+  padding: 7px 9px;
+  background: var(--bg);
+  border: 1px solid var(--border-light);
+  border-radius: 4px;
+  max-height: 280px;
+  overflow: auto;
+}
+.dp-result-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 4px;
+}
+.dp-result-label {
+  font-size: 10.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  color: var(--text-muted);
+}
+.dp-result-val {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  color: var(--text);
+  user-select: text;            /* 결과를 다시 선택/복사 가능 */
 }
 
 /* ── 전체 검색 패널 ───────────────────────────────── */

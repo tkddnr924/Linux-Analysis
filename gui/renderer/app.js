@@ -148,6 +148,7 @@ async function init() {
 
   $('modal-close').addEventListener('click', closeModal)
   $('modal-overlay').addEventListener('click', closeModal)
+  initDecodePopup()
 
   document.addEventListener('keydown', e => {
     if (e.key === 'Escape') {
@@ -1268,7 +1269,126 @@ function showRowModal(columns, row) {
   $('modal-body').innerHTML = html
   $('row-modal').classList.remove('hidden')
 }
-function closeModal() { $('row-modal').classList.add('hidden') }
+function closeModal() {
+  $('row-modal').classList.add('hidden')
+  hideDecodePopup()
+}
+
+// ── 모달 내 선택 텍스트 디코드 (URL / Base64) ───────────
+// 행 상세 모달 안에서 텍스트를 드래그하면 선택 영역 근처에 팝업이 떠 URL/Base64 디코드를 제공.
+let _dpLastText = ''
+
+function initDecodePopup() {
+  const popup     = $('decode-popup')
+  const modalBody = $('modal-body')
+
+  // 모달 안에서 드래그/선택 종료 시 평가
+  document.addEventListener('mouseup', () => {
+    // 팝업 자체 내부 클릭은 무시 (버튼 누르려는 것)
+    // mouseup 직후 selection 이 갱신되도록 microtask 뒤로 미룸
+    setTimeout(() => {
+      const sel = window.getSelection()
+      const txt = sel ? sel.toString() : ''
+      if (!txt || !txt.trim()) { hideDecodePopup(); return }
+
+      const range = sel.rangeCount ? sel.getRangeAt(0) : null
+      if (!range) { hideDecodePopup(); return }
+      const node = range.commonAncestorContainer
+      const el   = node.nodeType === 1 ? node : node.parentElement
+      if (!modalBody.contains(el)) { hideDecodePopup(); return }
+
+      _dpLastText = txt
+      showDecodePopup(range.getBoundingClientRect())
+    }, 0)
+  })
+
+  // 팝업 밖 클릭 시 닫기 (모달 내부 클릭은 mouseup 처리에 위임)
+  document.addEventListener('mousedown', e => {
+    if (popup.classList.contains('hidden')) return
+    if (popup.contains(e.target))     return
+    if (modalBody.contains(e.target)) return
+    hideDecodePopup()
+  })
+
+  // 모달 스크롤 시 팝업 닫음(위치가 어긋남)
+  modalBody.addEventListener('scroll', hideDecodePopup, { passive: true })
+
+  // ESC 로 팝업만 먼저 닫기 (모달 닫힘 키 핸들러보다 먼저 처리)
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape' && !popup.classList.contains('hidden')) {
+      e.stopPropagation()
+      hideDecodePopup()
+    }
+  }, true)
+
+  $('dp-close').addEventListener('click', hideDecodePopup)
+  $('dp-url') .addEventListener('click', () => doDecode('url'))
+  $('dp-b64') .addEventListener('click', () => doDecode('b64'))
+  $('dp-copy').addEventListener('click', () => copyToClipboard(_dpLastText, '선택 텍스트 복사됨'))
+  $('dp-result-copy').addEventListener('click', () =>
+    copyToClipboard($('dp-result-val').textContent, '결과 복사됨')
+  )
+}
+
+function showDecodePopup(rect) {
+  const popup = $('decode-popup')
+  popup.classList.remove('hidden')
+  $('dp-result').classList.add('hidden')
+
+  // 레이아웃 후 폭/높이 측정 → 위치 결정 (선택 아래, 화면 넘치면 위쪽)
+  const pw = popup.offsetWidth  || 320
+  const ph = popup.offsetHeight || 40
+  const pad = 8
+  let x = rect.left
+  let y = rect.bottom + 6
+  if (x + pw > window.innerWidth - pad) x = window.innerWidth - pw - pad
+  if (y + ph > window.innerHeight - pad) y = rect.top - ph - 6
+  popup.style.left = Math.max(pad, x) + 'px'
+  popup.style.top  = Math.max(pad, y) + 'px'
+}
+
+function hideDecodePopup() {
+  $('decode-popup').classList.add('hidden')
+  $('dp-result').classList.add('hidden')
+}
+
+function doDecode(kind) {
+  let label, val
+  try {
+    if (kind === 'url') {
+      label = 'URL 디코드'
+      val   = decodeURIComponent(_dpLastText.replace(/\+/g, '%20'))
+    } else {
+      label = 'Base64 디코드'
+      val   = base64DecodeUtf8(_dpLastText)
+    }
+  } catch (e) {
+    label = (kind === 'url' ? 'URL' : 'Base64') + ' 디코드 실패'
+    val   = e?.message || String(e)
+  }
+  $('dp-result-label').textContent = label
+  $('dp-result-val').textContent   = val
+  $('dp-result').classList.remove('hidden')
+}
+
+// Base64 디코드 — URL-safe(-_) 정규화 + 패딩 자동 보정 + UTF-8 복원
+function base64DecodeUtf8(text) {
+  let s = text.trim().replace(/\s+/g, '').replace(/-/g, '+').replace(/_/g, '/')
+  if (!/^[A-Za-z0-9+/=]+$/.test(s)) throw new Error('Base64 가 아닌 문자 포함')
+  const pad = (4 - s.length % 4) % 4
+  s += '='.repeat(pad)
+  const bin   = atob(s)
+  const bytes = Uint8Array.from(bin, c => c.charCodeAt(0))
+  return new TextDecoder('utf-8', { fatal: false }).decode(bytes)
+}
+
+function copyToClipboard(text, okMsg) {
+  if (!text) return
+  const ok = () => setStatus(okMsg || '복사됨')
+  const ng = () => setStatus('복사 실패', true)
+  if (navigator.clipboard?.writeText) navigator.clipboard.writeText(text).then(ok, ng)
+  else ng()
+}
 
 // ── 전체 검색 ─────────────────────────────────────────
 function openGlobalSearch()  { $('gs-panel').classList.remove('hidden'); $('gs-input').focus() }
