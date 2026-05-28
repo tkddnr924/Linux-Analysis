@@ -746,6 +746,94 @@ body.col-resizing * { cursor: col-resize !important; user-select: none !importan
   white-space: pre-wrap;
 }
 
+/* ── IP 활동 드릴다운 (ip_summary 행 클릭) ──────────── */
+.ipd-loading, .ipd-empty {
+  padding: 20px;
+  color: var(--text-muted);
+  font-size: 13px;
+  text-align: center;
+}
+.ip-detail { display: flex; flex-direction: column; gap: 12px; }
+
+.ipd-title {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--border-light);
+}
+.ipd-ip {
+  font-family: var(--font-mono);
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--text);
+}
+.ipd-total {
+  font-size: 11.5px;
+  color: var(--text-muted);
+  background: var(--surface-2);
+  padding: 2px 8px;
+  border-radius: 999px;
+}
+
+.ipd-section {
+  background: var(--surface-2);
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+.ipd-section-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border-light);
+}
+.ipd-section-name { font-weight: 700; font-size: 12.5px; color: var(--text); }
+.ipd-section-cnt {
+  font-size: 11px;
+  color: var(--accent);
+  background: var(--accent-light);
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-variant-numeric: tabular-nums;
+}
+.ipd-jump {
+  margin-left: auto;
+  font-size: 13px;
+  padding: 2px 6px;
+}
+
+.ipd-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11.5px;
+  table-layout: auto;
+}
+.ipd-table th, .ipd-table td {
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border-light);
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 320px;
+}
+.ipd-table th {
+  font-size: 10.5px;
+  font-weight: 700;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: .05em;
+  background: var(--surface-2);
+}
+.ipd-table td {
+  font-family: var(--font-mono);
+  color: var(--text);
+}
+.ipd-table tbody tr:hover { background: var(--row-hover); }
+
 /* ── 디코드 팝업 (모달 내 텍스트 선택 시) ───────────── */
 .decode-popup {
   position: fixed;
