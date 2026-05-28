@@ -13,18 +13,42 @@ let currentDbPath = null
 const AUTO_DB = path.join(__dirname, '..', 'parser.db')
 
 // ── 검색/필터 접두어 문법 ────────────────────────────
-//   foo   → 포함  (LIKE %foo%)
-//   !foo  → 제외  (NOT LIKE %foo%)
-//   =foo  → 정확히 (= foo)
-//   공백으로 구분된 여러 토큰은 AND 로 결합
+//   foo                 → 포함  (LIKE %foo%)
+//   !foo                → 제외  (NOT LIKE %foo%)
+//   =foo                → 정확히 (= foo)
+//   "foo bar"           → 공백 포함 그대로 한 토큰
+//   ="2026-02-02 01:01" → 공백 포함 정확히
+//   !"connection reset" → 공백 포함 제외
+//   공백으로 구분된 여러 토큰은 AND 로 결합. ' 도 " 와 동일하게 동작.
 function parseFilterTokens (raw) {
   if (raw == null) return []
+  const s = String(raw)
   const out = []
-  for (const part of String(raw).trim().split(/\s+/)) {
-    if (!part) continue
-    if (part[0] === '!') { if (part.length > 1) out.push({ op: 'exclude', term: part.slice(1) }) }
-    else if (part[0] === '=') { if (part.length > 1) out.push({ op: 'exact', term: part.slice(1) }) }
-    else out.push({ op: 'contains', term: part })
+  let i = 0
+  while (i < s.length) {
+    // 토큰 사이 공백 스킵
+    while (i < s.length && /\s/.test(s[i])) i++
+    if (i >= s.length) break
+
+    // 접두어 (!, =) — 단, 그 자체로 끝나거나 공백이 이어지면 일반 토큰으로
+    let op = 'contains'
+    if ((s[i] === '!' || s[i] === '=') && i + 1 < s.length && !/\s/.test(s[i + 1])) {
+      op = s[i] === '!' ? 'exclude' : 'exact'
+      i++
+    }
+
+    // 본문 — 따옴표로 시작하면 닫는 따옴표까지(없으면 라인 끝까지), 아니면 다음 공백까지
+    let term = ''
+    if (i < s.length && (s[i] === '"' || s[i] === "'")) {
+      const q = s[i]
+      i++
+      while (i < s.length && s[i] !== q) { term += s[i]; i++ }
+      if (i < s.length) i++   // 닫는 따옴표 소비
+    } else {
+      while (i < s.length && !/\s/.test(s[i])) { term += s[i]; i++ }
+    }
+
+    if (term) out.push({ op, term })
   }
   return out
 }

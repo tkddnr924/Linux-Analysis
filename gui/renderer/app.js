@@ -1113,7 +1113,7 @@ function renderTableData(containerId, columns, rows, reloadFn) {
     const active = val.trim() ? ' active' : ''
     thead += `<th><input class="col-filter-input${active}" data-col="${esc(col)}"
       value="${esc(val)}" placeholder="필터  !제외  =정확히"
-      title="포함: error · 제외: !debug · 정확히: =200 · 공백으로 여러 조건(AND)"
+      title='포함: error · 제외: !debug · 정확히: =200 · 공백 포함은 "따옴표" 로 묶기 · 토큰 사이는 AND'
       autocomplete="off" spellcheck="false" /></th>`
   }
   thead += '</tr></thead>'
