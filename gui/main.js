@@ -60,6 +60,24 @@ function buildSearchCondition (cols, raw) {
   return { clause: clauses.length ? clauses.join(' AND ') : '', params }
 }
 
+// ── 대시보드 사전계산 캐시 ───────────────────────────
+// 파서(analyzer/dashboard.py) 가 미리 채워둔 dashboard 테이블에서
+// 페이로드를 즉시 읽어옴. 캐시가 없거나 깨졌으면 라이브 폴백.
+function readDashboardCache(name) {
+  if (!db) return null
+  try {
+    const row = db.prepare("SELECT payload FROM dashboard WHERE table_name = ?").get(name)
+    if (!row || !row.payload) return null
+    return JSON.parse(row.payload)
+  } catch { return null }   // dashboard 테이블 없음 = 옛 DB
+}
+
+function getDashboardPayload(name, liveFn) {
+  const cached = readDashboardCache(name)
+  if (cached) return cached
+  try { return liveFn() } catch { return null }
+}
+
 // ── 공통(자동) 대시보드 ──────────────────────────────
 // 집계할 핵심 컬럼 우선순위(존재하는 것 중 앞에서부터 최대 4개)
 const GENERIC_KEY_COLS = [
@@ -304,6 +322,10 @@ ipcMain.handle('db:getSysinfo', () => {
 // ── IPC: Audit 대시보드 통계 ─────────────────────────
 ipcMain.handle('db:getAuditDashboard', () => {
   if (!db) return null
+  // 1) 사전계산 캐시 우선
+  const cached = readDashboardCache('audit')
+  if (cached) return cached
+  // 2) 캐시 없으면 라이브 계산 (옛 DB 호환)
   try {
     const exists = db.prepare(
       "SELECT name FROM sqlite_master WHERE type='table' AND name='audit'"
@@ -386,6 +408,8 @@ ipcMain.handle('db:getAuditDashboard', () => {
 // ── IPC: Authlog 대시보드 통계 ───────────────────────
 ipcMain.handle('db:getAuthlogDashboard', () => {
   if (!db) return null
+  const cached = readDashboardCache('authlog')
+  if (cached) return cached
   try {
     const exists = db.prepare(
       "SELECT name FROM sqlite_master WHERE type='table' AND name='authlog'"
@@ -474,6 +498,8 @@ ipcMain.handle('db:getAuthlogDashboard', () => {
 // ── IPC: Syslog 대시보드 통계 ───────────────────────
 ipcMain.handle('db:getSyslogDashboard', () => {
   if (!db) return null
+  const cached = readDashboardCache('syslog')
+  if (cached) return cached
   try {
     const exists = db.prepare(
       "SELECT name FROM sqlite_master WHERE type='table' AND name='syslog'"
@@ -532,6 +558,8 @@ ipcMain.handle('db:getSyslogDashboard', () => {
 // ── IPC: Apache2 대시보드 통계 ──────────────────────
 ipcMain.handle('db:getApache2Dashboard', () => {
   if (!db) return null
+  const cached = readDashboardCache('apache2')
+  if (cached) return cached
   try {
     const exists = db.prepare(
       "SELECT name FROM sqlite_master WHERE type='table' AND name='apache2'"
@@ -594,6 +622,8 @@ ipcMain.handle('db:getApache2Dashboard', () => {
 // 총 건수는 렌더러가 이미 보유(getTableData total)하므로 여기서 COUNT 재실행하지 않음.
 ipcMain.handle('db:getGenericDashboard', (_e, table) => {
   if (!db) return null
+  const cached = readDashboardCache(table)
+  if (cached) return cached
   try {
     const cols = db.prepare(`PRAGMA table_info("${table}")`).all().map(r => r.name)
     if (!cols.length) return null

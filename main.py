@@ -44,6 +44,7 @@ import parser.nginxlog     as nginxlog
 import parser.kernlog      as kernlog
 import parser.mysqllog     as mysqlmod
 import analyzer.sysinfo   as sysinfo_analyzer
+import analyzer.dashboard as dashboard_analyzer
 from parser.utils.files import md5 as file_md5, is_compressed, decompress
 
 # ── 설정 ──────────────────────────────────────────────
@@ -281,6 +282,10 @@ def parse_logs():
             sysinfo_analyzer.run(conn)
         else:
             print("\n[SYSINFO] Volatile/NonVolatile 없음 → 건너뜁니다.")
+
+        # 대시보드 페이로드 사전 계산 → 뷰어 진입 시 즉시 렌더
+        print("\n[DASHBOARD] 사전 계산 중...")
+        dashboard_analyzer.run(conn)
     finally:
         conn.close()
         cleanup_decomp()
