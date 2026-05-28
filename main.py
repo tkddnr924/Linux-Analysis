@@ -187,6 +187,26 @@ def cleanup_decomp():
         shutil.rmtree(DECOMP_DIR)
 
 
+# 경로 힌트로 파서 간 글로브 충돌 해소 (특히 apache2 vs nginx).
+# apache2 글로브 `*access.log*` 는 nginx 파일까지 잡아채므로,
+# 디렉토리에 /nginx/ 가 들어가면 apache2 후보에서 제거하고 반대도 동일.
+_PARSER_PATH_EXCLUDE = {
+    "apache2":       ("/nginx/",),
+    "apache2_error": ("/nginx/",),
+    "nginx":         ("/apache2/", "/httpd/"),
+    "nginx_error":   ("/apache2/", "/httpd/"),
+}
+
+def _filter_by_parser_path(name: str, files: list[Path]) -> list[Path]:
+    excludes = _PARSER_PATH_EXCLUDE.get(name)
+    if not excludes:
+        return files
+    def keep(p: Path) -> bool:
+        s = str(p).replace("\\", "/").lower()
+        return not any(ex in s for ex in excludes)
+    return [f for f in files if keep(f)]
+
+
 # 대량 삽입 동안 한 트랜잭션에 묶을 행 수. WAL 크기를 제한하면서
 # commit(=fsync) 횟수를 (기존 1,000행마다 → 10만 행마다)로 대폭 줄임.
 COMMIT_EVERY = 100_000
@@ -217,6 +237,7 @@ def scan(base: Path) -> dict:
         search_base = sd if sd is not None else base
         globs = target.get("globs") or target.get("glob", "")
         files = find_files(search_base, globs)
+        files = _filter_by_parser_path(target["name"], files)
         found[target["name"]] = {
             "files":  files,
             "module": target["module"],

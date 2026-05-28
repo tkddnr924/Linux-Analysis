@@ -97,15 +97,19 @@ def _vhost_from_path(file_path: Path) -> tuple[str, bool]:
     return ("unknown", False)
 
 
+# Apache/nginx 는 %{...}i 필드 내부의 " 를 \" 로, \ 를 \\ 로 이스케이프함.
+# [^"]* 는 \" 를 인식 못해 UA가 깨지므로 (?:[^"\\]|\\.)* 패턴 사용.
+_Q = r'(?:[^"\\]|\\.)*'
+
 _COMBINED_RE = re.compile(
     r"^(?P<src_ip>\S+)"
     r" \S+ \S+ "
     r"\[(?P<datetime>[^\]]+)\]"
-    r' "(?P<request>[^"]*)"'
+    rf' "(?P<request>{_Q})"'
     r" (?P<status>\d{3})"
     r" (?P<bytes>\S+)"
-    r'(?: "(?P<referer>[^"]*)")?'
-    r'(?: "(?P<ua>[^"]*)")?'
+    rf'(?: "(?P<referer>{_Q})")?'
+    rf'(?: "(?P<ua>{_Q})")?'
 )
 
 _VHOST_RE = re.compile(
@@ -113,14 +117,19 @@ _VHOST_RE = re.compile(
     r"(?P<src_ip>\S+)"
     r" \S+ \S+ "
     r"\[(?P<datetime>[^\]]+)\]"
-    r' "(?P<request>[^"]*)"'
+    rf' "(?P<request>{_Q})"'
     r" (?P<status>\d{3})"
     r" (?P<bytes>\S+)"
-    r'(?: "(?P<referer>[^"]*)")?'
-    r'(?: "(?P<ua>[^"]*)")?'
+    rf'(?: "(?P<referer>{_Q})")?'
+    rf'(?: "(?P<ua>{_Q})")?'
 )
 
 _REQUEST_RE = re.compile(r"^(\S+)\s+(\S+)\s+(\S+)$")
+
+# LogFormat 이스케이프 해제: \" → ",  \\ → \  (단일 패스)
+_UNESC_RE = re.compile(r'\\(.)')
+def _unesc(s: str) -> str:
+    return _UNESC_RE.sub(r'\1', s) if s else s
 
 
 class Apache2LogEntry:
@@ -159,13 +168,14 @@ class Apache2LogEntry:
         self.status     = int(m.group("status"))
         raw_bytes       = m.group("bytes")
         self.bytes_sent = int(raw_bytes) if raw_bytes and raw_bytes != "-" else 0
-        self.referer    = m.group("referer") or ""
-        self.user_agent = m.group("ua") or ""
-        req = _REQUEST_RE.match(m.group("request") or "")
+        self.referer    = _unesc(m.group("referer") or "")
+        self.user_agent = _unesc(m.group("ua") or "")
+        request_raw     = _unesc(m.group("request") or "")
+        req = _REQUEST_RE.match(request_raw)
         if req:
             self.method, self.uri, self.protocol = req.groups()
         else:
-            self.uri = m.group("request") or ""
+            self.uri = request_raw
 
 
 def ensure_db(conn: sqlite3.Connection):

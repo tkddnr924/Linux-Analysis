@@ -63,24 +63,36 @@ def _parse_access_dt(raw: str) -> str:
     return f"{year}-{_MONTHS.get(mon, '00')}-{day} {time}.000"
 
 
+# nginx 가 따옴표 필드 안의 " 를 \" 로 이스케이프하므로 [^"]* 대신
+# (?:[^"\\]|\\.)* 패턴을 사용. 추가로 nginx 흔한 커스텀 포맷
+#   ... "$http_referer" "$http_user_agent" "$http_x_forwarded_for"
+# 의 3번째 따옴표 필드(xff) 도 캡처.
+_Q = r'(?:[^"\\]|\\.)*'
+
 _ACCESS_RE = re.compile(
     r'(?P<src_ip>\S+)'
     r' \S+ \S+ '
     r'\[(?P<datetime>[^\]]+)\]'
-    r' "(?P<request>[^"]*)"'
+    rf' "(?P<request>{_Q})"'
     r' (?P<status>\d{3})'
     r' (?P<bytes>\S+)'
-    r'(?: "(?P<referer>[^"]*)")?'
-    r'(?: "(?P<user_agent>[^"]*)")?'
+    rf'(?: "(?P<referer>{_Q})")?'
+    rf'(?: "(?P<user_agent>{_Q})")?'
+    rf'(?: "(?P<xff>{_Q})")?'
 )
 
 _REQUEST_RE = re.compile(r'^(\S+)\s+(\S+)\s+(\S+)$')
+
+# LogFormat 이스케이프 해제: \" → ",  \\ → \
+_UNESC_RE = re.compile(r'\\(.)')
+def _unesc(s: str) -> str:
+    return _UNESC_RE.sub(r'\1', s) if s else s
 
 
 class NginxLogEntry:
     __slots__ = (
         "src_ip", "date_time", "method", "uri", "protocol",
-        "status", "bytes_sent", "referer", "user_agent", "raw_line",
+        "status", "bytes_sent", "referer", "user_agent", "xff", "raw_line",
     )
 
     def __init__(self, line: str):
@@ -94,6 +106,7 @@ class NginxLogEntry:
         self.bytes_sent = 0
         self.referer    = ""
         self.user_agent = ""
+        self.xff        = ""
 
         m = _ACCESS_RE.match(line)
         if not m:
@@ -104,14 +117,16 @@ class NginxLogEntry:
         self.status     = int(m.group("status"))
         raw_bytes       = m.group("bytes")
         self.bytes_sent = int(raw_bytes) if raw_bytes and raw_bytes != "-" else 0
-        self.referer    = m.group("referer")    or ""
-        self.user_agent = m.group("user_agent") or ""
+        self.referer    = _unesc(m.group("referer")    or "")
+        self.user_agent = _unesc(m.group("user_agent") or "")
+        self.xff        = _unesc(m.group("xff")        or "")
 
-        req = _REQUEST_RE.match(m.group("request") or "")
+        request_raw = _unesc(m.group("request") or "")
+        req = _REQUEST_RE.match(request_raw)
         if req:
             self.method, self.uri, self.protocol = req.groups()
         else:
-            self.uri = m.group("request") or ""
+            self.uri = request_raw
 
 
 def ensure_db(conn: sqlite3.Connection):
@@ -128,9 +143,14 @@ def ensure_db(conn: sqlite3.Connection):
         bytes_sent  INTEGER,
         referer     TEXT,
         user_agent  TEXT,
+        xff         TEXT,
         raw_line    TEXT
     )
     """)
+    # 기존 DB(컬럼 없던 시절) 마이그레이션: xff 가 없으면 추가
+    existing = {r[1] for r in conn.execute(f"PRAGMA table_info({TABLE})").fetchall()}
+    if 'xff' not in existing:
+        conn.execute(f"ALTER TABLE {TABLE} ADD COLUMN xff TEXT")
     conn.commit()
 
 
@@ -147,7 +167,7 @@ def to_row(entry: NginxLogEntry) -> tuple:
     return (
         entry.date_time, entry.src_ip, entry.method, entry.uri,
         entry.protocol, entry.status, entry.bytes_sent,
-        entry.referer, entry.user_agent, entry.raw_line,
+        entry.referer, entry.user_agent, entry.xff, entry.raw_line,
     )
 
 
@@ -156,8 +176,8 @@ def insert_rows(conn: sqlite3.Connection, rows: list):
     conn.executemany(f"""
     INSERT INTO {TABLE}
         (date_time, src_ip, method, uri, protocol, status, bytes_sent,
-         referer, user_agent, raw_line)
-    VALUES (?,?,?,?,?,?,?,?,?,?)
+         referer, user_agent, xff, raw_line)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?)
     """, rows)
 
 
