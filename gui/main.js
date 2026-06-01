@@ -213,13 +213,16 @@ ipcMain.handle('db:close', () => {
   return { success: true }
 })
 
+// 사이드바에 노출하지 않는 내부 캐시/메타 테이블
+const _HIDDEN_TABLES = new Set(['dashboard', 'ip_summary'])
+
 // ── IPC: 테이블 목록 + 행 수 ─────────────────────────
 ipcMain.handle('db:getTables', () => {
   if (!db) return []
   try {
     const rows = db.prepare(
       "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
-    ).all()
+    ).all().filter(r => !_HIDDEN_TABLES.has(r.name))
     return rows.map(r => {
       try {
         const { c } = db.prepare(`SELECT COUNT(*) as c FROM "${r.name}"`).get()
@@ -686,36 +689,6 @@ ipcMain.handle('db:getGenericDashboard', (_e, table) => {
 
     return { table, tsCol, range, breakdowns, scanLimited: !allowScan }
   } catch { return null }
-})
-
-// ── IPC: IP 활동 드릴다운 ────────────────────────────
-// 한 IP의 각 소스 테이블별 카운트 + 샘플 20행(최신순). 'IP 분석' 행 클릭 시 사용.
-ipcMain.handle('db:getIpDetail', (_e, ip) => {
-  if (!db || !ip) return null
-  // 테이블별 (IP 매칭 컬럼, 샘플 SELECT 컬럼, 정렬 컬럼)
-  const SOURCES = [
-    { table: 'apache2',       ipCol: 'src_ip',    select: 'date_time, status, method, uri, user_agent', order: 'date_time' },
-    { table: 'apache2_error', ipCol: 'client_ip', select: 'date_time, level, module, message',           order: 'date_time' },
-    { table: 'nginx',         ipCol: 'src_ip',    select: 'date_time, status, method, uri, user_agent, xff', order: 'date_time' },
-    { table: 'nginx_error',   ipCol: 'client_ip', select: 'date_time, level, message',                   order: 'date_time' },
-    { table: 'authlog',       ipCol: 'src_ip',    select: 'date_time, event_type, user, raw_line',       order: 'date_time' },
-    { table: 'audit',         ipCol: 'addr',      select: 'date_time, type, acct, exe',                  order: 'date_time' },
-  ]
-  const out = {}
-  for (const s of SOURCES) {
-    try {
-      // 테이블 존재 여부 (sqlite_master)
-      const exists = db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(s.table)
-      if (!exists) continue
-      const c = db.prepare(`SELECT COUNT(*) AS c FROM "${s.table}" WHERE "${s.ipCol}" = ?`).get(ip).c
-      if (!c) continue
-      const samples = db.prepare(
-        `SELECT ${s.select} FROM "${s.table}" WHERE "${s.ipCol}" = ? ORDER BY "${s.order}" DESC LIMIT 20`
-      ).all(ip)
-      out[s.table] = { count: c, samples }
-    } catch { /* 컬럼 미존재 등 — 스킵 */ }
-  }
-  return out
 })
 
 // ── IPC: 전체 테이블 통합 검색 ───────────────────────

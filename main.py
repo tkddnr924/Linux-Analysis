@@ -43,9 +43,8 @@ import parser.apache2log   as apache2log
 import parser.nginxlog     as nginxlog
 import parser.kernlog      as kernlog
 import parser.mysqllog     as mysqlmod
-import analyzer.sysinfo    as sysinfo_analyzer
-import analyzer.dashboard  as dashboard_analyzer
-import analyzer.ip_summary as ip_summary_analyzer
+import analyzer.sysinfo   as sysinfo_analyzer
+import analyzer.dashboard as dashboard_analyzer
 from parser.utils.files import md5 as file_md5, is_compressed, decompress
 
 # ── 설정 ──────────────────────────────────────────────
@@ -288,9 +287,12 @@ def parse_logs():
         print("\n[DASHBOARD] 사전 계산 중...")
         dashboard_analyzer.run(conn)
 
-        # 크로스-테이블 IP 집계 → 'IP 분석' 화면용
-        print("\n[IP SUMMARY] 사전 계산 중...")
-        ip_summary_analyzer.run(conn)
+        # 옛 DB 에 남아 있는 IP 분석 산물 정리 (현재는 미사용)
+        try:
+            conn.execute("DROP TABLE IF EXISTS ip_summary")
+            conn.commit()
+        except Exception:
+            pass
     finally:
         conn.close()
         cleanup_decomp()

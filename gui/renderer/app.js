@@ -21,15 +21,9 @@ const TABLE_META = {
   nginx_error:   { label: 'Nginx 에러',          group: '웹 서버' },
   mysql_query:   { label: 'MySQL 쿼리',          group: '데이터베이스' },
   mysql_error:   { label: 'MySQL 에러',          group: '데이터베이스' },
-  ip_summary:    { label: 'IP 분석',             group: '분석' },
 }
 
-const GROUP_ORDER = ['시스템', '인증', '감사', '시스템 로그', '웹 서버', '데이터베이스', '분석']
-
-// 테이블 진입 시 사용할 기본 정렬 (없으면 main.js 가 tsCol ASC 적용)
-const DEFAULT_SORT = {
-  ip_summary: { col: 'total_count', dir: 'DESC' },
-}
+const GROUP_ORDER = ['시스템', '인증', '감사', '시스템 로그', '웹 서버', '데이터베이스']
 
 // 대시보드를 가진 테이블
 const ARTIFACT_TABLES = new Set(['audit', 'authlog', 'apache2', 'syslog'])
@@ -243,10 +237,7 @@ async function selectTable(tableName) {
   if (ARTIFACT_TABLES.has(tableName))  { await selectArtifact(tableName); return }
 
   S.currentTable = tableName
-  const ds = DEFAULT_SORT[tableName]
-  S.page = 0; S.search = ''
-  S.sortCol = ds?.col || null
-  S.sortDir = ds?.dir || 'ASC'
+  S.page = 0; S.search = ''; S.sortCol = null; S.sortDir = 'ASC'
   S.dateFrom = ''; S.dateTo = ''; S.colFilters = {}; S.colWidths = {}
   $('search-input').value = ''
   $('btn-clear').classList.add('hidden')
@@ -1177,16 +1168,10 @@ function renderTableData(containerId, columns, rows, reloadFn) {
     })
   })
 
-  // 행 클릭 → 상세 모달 (ip_summary 는 IP 드릴다운으로 라우팅)
+  // 행 클릭 → 상세 모달
   if (rows.length) {
     tbl.querySelectorAll('tbody tr').forEach((tr, i) =>
-      tr.addEventListener('click', () => {
-        if (st === S && S.currentTable === 'ip_summary' && rows[i]?.ip) {
-          showIpDetailModal(rows[i].ip)
-        } else {
-          showRowModal(columns, rows[i])
-        }
-      })
+      tr.addEventListener('click', () => showRowModal(columns, rows[i]))
     )
   }
 
@@ -1289,93 +1274,6 @@ function closeModal() {
   hideDecodePopup()
 }
 
-// ── IP 활동 드릴다운 모달 (ip_summary 행 클릭 시) ────
-async function showIpDetailModal(ip) {
-  $('modal-body').innerHTML = `<div class="ipd-loading">불러오는 중…</div>`
-  $('row-modal').classList.remove('hidden')
-  const data = await window.api.getIpDetail(ip)
-  renderIpDetail(ip, data)
-}
-
-function renderIpDetail(ip, data) {
-  if (!data || !Object.keys(data).length) {
-    $('modal-body').innerHTML = `<div class="ipd-empty">IP <code>${esc(ip)}</code> 의 활동을 찾지 못했습니다.</div>`
-    return
-  }
-
-  let total = 0
-  for (const v of Object.values(data)) total += (v?.count || 0)
-
-  let html = `<div class="ip-detail">
-    <div class="ipd-title">
-      <span class="ipd-ip">${esc(ip)}</span>
-      <span class="ipd-total">${total.toLocaleString()}건</span>
-    </div>`
-
-  for (const [tbl, info] of Object.entries(data)) {
-    if (!info || !info.count) continue
-    const label = TABLE_META[tbl]?.label || tbl
-    html += `<div class="ipd-section">
-      <div class="ipd-section-head">
-        <span class="ipd-section-name">${esc(label)}</span>
-        <span class="ipd-section-cnt">${info.count.toLocaleString()}건</span>
-        <button class="ipd-jump btn-icon" data-table="${esc(tbl)}" data-ip="${esc(ip)}"
-                title="이 테이블로 이동해 해당 IP 로 필터">↗</button>
-      </div>`
-    if (info.samples?.length) {
-      const cols = Object.keys(info.samples[0])
-      html += `<table class="ipd-table"><thead><tr>${cols.map(c=>`<th>${esc(c)}</th>`).join('')}</tr></thead><tbody>`
-      for (const row of info.samples) {
-        html += '<tr>' + cols.map(c => {
-          const v = String(row[c] ?? '')
-          const disp = v.length > 100 ? v.slice(0, 100) + '…' : v
-          return `<td title="${esc(v)}">${esc(disp)}</td>`
-        }).join('') + '</tr>'
-      }
-      html += '</tbody></table>'
-    }
-    html += '</div>'
-  }
-  html += '</div>'
-  $('modal-body').innerHTML = html
-
-  // ↗ 버튼: 해당 테이블로 이동 + 그 IP 정확히 필터
-  $('modal-body').querySelectorAll('.ipd-jump').forEach(btn =>
-    btn.addEventListener('click', e => {
-      e.stopPropagation()
-      const tbl = btn.dataset.table
-      const ipv = btn.dataset.ip
-      closeModal()
-      jumpToTableWithIp(tbl, ipv)
-    })
-  )
-}
-
-// 특정 테이블로 이동해서 IP 컬럼에 정확히(=) 필터 걸기
-async function jumpToTableWithIp(tableName, ip) {
-  const IP_COL = {
-    apache2:       'src_ip',
-    apache2_error: 'client_ip',
-    nginx:         'src_ip',
-    nginx_error:   'client_ip',
-    authlog:       'src_ip',
-    audit:         'addr',
-  }
-  const col = IP_COL[tableName]
-  // 아티팩트 테이블이면 A.colFilters, 일반 테이블이면 S.colFilters
-  const isArtifact = ARTIFACT_TABLES.has(tableName)
-  await selectTable(tableName)
-  if (!col) return
-  if (isArtifact) {
-    A.colFilters = { ...(A.colFilters || {}), [col]: '=' + ip }
-    A.page = 0
-    await loadArtifactTable()
-  } else {
-    S.colFilters = { ...(S.colFilters || {}), [col]: '=' + ip }
-    S.page = 0
-    await loadTable()
-  }
-}
 
 // ── 모달 내 선택 텍스트 디코드 (URL / Base64) ───────────
 // 행 상세 모달 안에서 텍스트를 드래그하면 선택 영역 근처에 팝업이 떠 URL/Base64 디코드를 제공.
