@@ -1386,8 +1386,10 @@ function initDecodePopup() {
   const modalBody = $('modal-body')
 
   // 모달 안에서 드래그/선택 종료 시 평가
-  document.addEventListener('mouseup', () => {
-    // 팝업 자체 내부 클릭은 무시 (버튼 누르려는 것)
+  document.addEventListener('mouseup', e => {
+    // 팝업 내부에서의 mouseup(=버튼 클릭) 은 selection 재평가 대상 아님.
+    // 버튼 클릭 시 일부 브라우저가 selection 을 해제하면서 결과창이 닫히던 버그 방지.
+    if (popup.contains(e.target)) return
     // mouseup 직후 selection 이 갱신되도록 microtask 뒤로 미룸
     setTimeout(() => {
       const sel = window.getSelection()
@@ -1435,16 +1437,20 @@ function initDecodePopup() {
 
 function showDecodePopup(rect) {
   const popup = $('decode-popup')
+  // 선택된 텍스트 프리뷰 — 너무 길면 잘라서 표시
+  const t = _dpLastText || ''
+  $('dp-source-text').textContent = t.length > 240 ? t.slice(0, 240) + '…' : t
+
   popup.classList.remove('hidden')
   $('dp-result').classList.add('hidden')
 
   // 레이아웃 후 폭/높이 측정 → 위치 결정 (선택 아래, 화면 넘치면 위쪽)
-  const pw = popup.offsetWidth  || 320
-  const ph = popup.offsetHeight || 40
+  const pw  = popup.offsetWidth  || 380
+  const ph  = popup.offsetHeight || 120
   const pad = 8
   let x = rect.left
   let y = rect.bottom + 6
-  if (x + pw > window.innerWidth - pad) x = window.innerWidth - pw - pad
+  if (x + pw > window.innerWidth  - pad) x = window.innerWidth  - pw - pad
   if (y + ph > window.innerHeight - pad) y = rect.top - ph - 6
   popup.style.left = Math.max(pad, x) + 'px'
   popup.style.top  = Math.max(pad, y) + 'px'

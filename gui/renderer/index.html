@@ -182,16 +182,32 @@
 
   <!-- ── 디코드 팝업 (모달 내 텍스트 선택 시) ── -->
   <div id="decode-popup" class="decode-popup hidden" role="dialog" aria-label="디코드">
-    <div class="dp-buttons">
-      <button id="dp-url"   class="dp-btn" title="URL 인코딩(%xx) 디코드">URL 디코드</button>
-      <button id="dp-b64"   class="dp-btn" title="Base64 디코드 (URL-safe·패딩 자동 보정)">Base64 디코드</button>
-      <button id="dp-copy"  class="dp-btn dp-btn-ghost" title="선택 텍스트 복사">복사</button>
-      <button id="dp-close" class="dp-btn dp-btn-close" title="닫기 (Esc)">×</button>
+    <div class="dp-header">
+      <span class="dp-title">디코드</span>
+      <button id="dp-close" class="dp-x" title="닫기 (Esc)" aria-label="닫기">×</button>
+    </div>
+    <div class="dp-source">
+      <div class="dp-source-label">선택된 텍스트</div>
+      <div id="dp-source-text" class="dp-source-text"></div>
+    </div>
+    <div class="dp-actions">
+      <button id="dp-url"  class="dp-action" title="URL 인코딩(%xx) 디코드">
+        <span class="dp-action-name">URL</span>
+        <span class="dp-action-sub">%xx → 문자</span>
+      </button>
+      <button id="dp-b64"  class="dp-action" title="Base64 디코드 (URL-safe·패딩 자동 보정)">
+        <span class="dp-action-name">Base64</span>
+        <span class="dp-action-sub">B64 → 원본</span>
+      </button>
+      <button id="dp-copy" class="dp-action dp-action-ghost" title="선택 원본 복사">
+        <span class="dp-action-name">복사</span>
+        <span class="dp-action-sub">원본</span>
+      </button>
     </div>
     <div id="dp-result" class="dp-result hidden">
       <div class="dp-result-head">
         <span id="dp-result-label" class="dp-result-label"></span>
-        <button id="dp-result-copy" class="dp-btn dp-btn-ghost dp-btn-sm" title="결과 복사">결과 복사</button>
+        <button id="dp-result-copy" class="dp-result-copy" title="결과 복사">결과 복사</button>
       </div>
       <div id="dp-result-val" class="dp-result-val"></div>
     </div>
