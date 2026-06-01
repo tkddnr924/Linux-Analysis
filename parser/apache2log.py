@@ -142,19 +142,24 @@ def _trailing_fields(rest: str) -> list[str]:
 
     1) 따옴표 필드가 하나라도 있으면 그것만 사용 — 위치 0=referer, 1=ua, 2=xff.
        (응답시간 같은 비-따옴표 사이드 필드는 자연히 무시됨)
-    2) 따옴표 필드가 0개이면 비-따옴표 토큰으로 fallback:
-       - 1개 토큰   → ['', 토큰]  (UA 만 있고 referer 생략된 커스텀 LogFormat)
-       - 2개 이상  → [첫토큰, 마지막토큰]  (referer + UA, 중간은 무시)
+    2) 따옴표 0개일 때는 unquoted 본문 전체를 UA 로 보존 — 공백이 포함된 UA
+       (예: 'Mozilla/5.0 (Windows NT 10.0)') 가 토큰 단위로 잘려 referer 로
+       오인되는 것 방지. 단, 첫 토큰이 명백한 referer 표지(`-` 또는
+       `http(s)://...`) 인 경우에만 그것을 referer 로 떼어내고 나머지를 UA 로.
     """
     quoted = _QUOTED_FIELD_RE.findall(rest)
     if quoted:
         return quoted
-    tokens = _UNQUOTED_TOK_RE.findall(rest)
-    if not tokens:
+
+    body = rest.strip()
+    if not body:
         return []
-    if len(tokens) == 1:
-        return ["", tokens[0]]
-    return [tokens[0], tokens[-1]]
+    parts = body.split(None, 1)               # 최대 1회 분할
+    first = parts[0]
+    tail  = parts[1] if len(parts) > 1 else ""
+    if first == "-" or first.startswith(("http://", "https://")):
+        return [first, tail]
+    return ["", body]
 
 
 class Apache2LogEntry:

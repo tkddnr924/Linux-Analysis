@@ -89,16 +89,22 @@ def _unesc(s: str) -> str:
 
 
 def _trailing_fields(rest: str) -> list[str]:
-    """bytes 이후 referer / ua / xff 후보 — apache2log._trailing_fields 와 동일 정책."""
+    """bytes 이후 referer / ua / xff 후보 — apache2log._trailing_fields 와 동일 정책.
+       따옴표 있으면 그대로, 없으면 unquoted body 전체를 UA 로 보존
+       (단, 첫 토큰이 `-` 또는 http(s):// 이면 그것만 referer 로 분리)."""
     quoted = _QUOTED_FIELD_RE.findall(rest)
     if quoted:
         return quoted
-    tokens = _UNQUOTED_TOK_RE.findall(rest)
-    if not tokens:
+
+    body = rest.strip()
+    if not body:
         return []
-    if len(tokens) == 1:
-        return ["", tokens[0]]
-    return [tokens[0], tokens[-1]]
+    parts = body.split(None, 1)
+    first = parts[0]
+    tail  = parts[1] if len(parts) > 1 else ""
+    if first == "-" or first.startswith(("http://", "https://")):
+        return [first, tail]
+    return ["", body]
 
 
 class NginxLogEntry:
