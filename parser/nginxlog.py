@@ -80,11 +80,25 @@ _ACCESS_RE = re.compile(
 
 _REQUEST_RE      = re.compile(r'^(\S+)\s+(\S+)\s+(\S+)$')
 _QUOTED_FIELD_RE = re.compile(rf'"({_Q})"')
+_UNQUOTED_TOK_RE = re.compile(r'\S+')
 
 # LogFormat 이스케이프 해제: \" → ",  \\ → \
 _UNESC_RE = re.compile(r'\\(.)')
 def _unesc(s: str) -> str:
     return _UNESC_RE.sub(r'\1', s) if s else s
+
+
+def _trailing_fields(rest: str) -> list[str]:
+    """bytes 이후 referer / ua / xff 후보 — apache2log._trailing_fields 와 동일 정책."""
+    quoted = _QUOTED_FIELD_RE.findall(rest)
+    if quoted:
+        return quoted
+    tokens = _UNQUOTED_TOK_RE.findall(rest)
+    if not tokens:
+        return []
+    if len(tokens) == 1:
+        return ["", tokens[0]]
+    return [tokens[0], tokens[-1]]
 
 
 class NginxLogEntry:
@@ -115,11 +129,11 @@ class NginxLogEntry:
         self.status     = int(m.group("status"))
         raw_bytes       = m.group("bytes")
         self.bytes_sent = int(raw_bytes) if raw_bytes and raw_bytes != "-" else 0
-        # bytes 이후 모든 따옴표 필드를 위치 기반으로 매핑
-        quoted = _QUOTED_FIELD_RE.findall(m.group("rest") or "")
-        self.referer    = _unesc(quoted[0]) if len(quoted) >= 1 else ""
-        self.user_agent = _unesc(quoted[1]) if len(quoted) >= 2 else ""
-        self.xff        = _unesc(quoted[2]) if len(quoted) >= 3 else ""
+        # bytes 이후 referer / ua / xff — 따옴표 우선, 없으면 unquoted fallback
+        fields = _trailing_fields(m.group("rest") or "")
+        self.referer    = _unesc(fields[0]) if len(fields) >= 1 else ""
+        self.user_agent = _unesc(fields[1]) if len(fields) >= 2 else ""
+        self.xff        = _unesc(fields[2]) if len(fields) >= 3 else ""
 
         request_raw = _unesc(m.group("request") or "")
         req = _REQUEST_RE.match(request_raw)

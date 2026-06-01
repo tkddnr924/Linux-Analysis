@@ -128,11 +128,33 @@ _VHOST_RE = re.compile(
 
 _REQUEST_RE      = re.compile(r"^(\S+)\s+(\S+)\s+(\S+)$")
 _QUOTED_FIELD_RE = re.compile(rf'"({_Q})"')
+_UNQUOTED_TOK_RE = re.compile(r'\S+')
 
 # LogFormat 이스케이프 해제: \" → ",  \\ → \  (단일 패스)
 _UNESC_RE = re.compile(r'\\(.)')
 def _unesc(s: str) -> str:
     return _UNESC_RE.sub(r'\1', s) if s else s
+
+
+def _trailing_fields(rest: str) -> list[str]:
+    """
+    bytes 이후 'rest' 에서 referer / user_agent / (nginx: xff) 후보 추출.
+
+    1) 따옴표 필드가 하나라도 있으면 그것만 사용 — 위치 0=referer, 1=ua, 2=xff.
+       (응답시간 같은 비-따옴표 사이드 필드는 자연히 무시됨)
+    2) 따옴표 필드가 0개이면 비-따옴표 토큰으로 fallback:
+       - 1개 토큰   → ['', 토큰]  (UA 만 있고 referer 생략된 커스텀 LogFormat)
+       - 2개 이상  → [첫토큰, 마지막토큰]  (referer + UA, 중간은 무시)
+    """
+    quoted = _QUOTED_FIELD_RE.findall(rest)
+    if quoted:
+        return quoted
+    tokens = _UNQUOTED_TOK_RE.findall(rest)
+    if not tokens:
+        return []
+    if len(tokens) == 1:
+        return ["", tokens[0]]
+    return [tokens[0], tokens[-1]]
 
 
 class Apache2LogEntry:
@@ -171,10 +193,10 @@ class Apache2LogEntry:
         self.status     = int(m.group("status"))
         raw_bytes       = m.group("bytes")
         self.bytes_sent = int(raw_bytes) if raw_bytes and raw_bytes != "-" else 0
-        # bytes 이후 'rest' 에서 모든 따옴표 필드 추출 — 트레일링 위치 가변 대응
-        quoted = _QUOTED_FIELD_RE.findall(m.group("rest") or "")
-        self.referer    = _unesc(quoted[0]) if len(quoted) >= 1 else ""
-        self.user_agent = _unesc(quoted[1]) if len(quoted) >= 2 else ""
+        # bytes 이후 referer / ua 추출 — 따옴표 우선, 없으면 unquoted 토큰 fallback
+        fields = _trailing_fields(m.group("rest") or "")
+        self.referer    = _unesc(fields[0]) if len(fields) >= 1 else ""
+        self.user_agent = _unesc(fields[1]) if len(fields) >= 2 else ""
         request_raw     = _unesc(m.group("request") or "")
         req = _REQUEST_RE.match(request_raw)
         if req:
