@@ -56,6 +56,56 @@
       <!-- 시스템 정보 뷰 -->
       <div id="sysinfo-view" class="sysinfo-view hidden"></div>
 
+      <!-- IP 별 기록 뷰 (좌: IP 목록 + 모드 / 우: 선택 IP records) -->
+      <div id="ip-view" class="ip-view hidden">
+        <aside class="ipv-left">
+          <div class="ipv-header">
+            <div class="ipv-modes">
+              <button class="ipv-mode-btn active" data-mode="all" title="개별 IP">전체</button>
+              <button class="ipv-mode-btn"        data-mode="c"   title="/24 (앞 3옥텟 동일)">C 클래스</button>
+              <button class="ipv-mode-btn"        data-mode="b"   title="/16 (앞 2옥텟 동일)">B 클래스</button>
+            </div>
+            <div class="ipv-search-wrap">
+              <input id="ipv-list-search" class="search-input" type="text"
+                     placeholder="IP 필터..." autocomplete="off" spellcheck="false" />
+            </div>
+            <div class="ipv-stats" id="ipv-stats">—</div>
+          </div>
+          <div id="ipv-list" class="ipv-list"></div>
+        </aside>
+        <main class="ipv-right">
+          <div class="toolbar">
+            <div class="toolbar-left">
+              <h2 id="ipv-title" class="table-title">IP를 선택하세요</h2>
+              <span id="ipv-badge" class="badge">0건</span>
+            </div>
+            <div class="toolbar-right">
+              <button id="ipv-reset-filters" class="btn btn-ghost btn-reset"
+                      title="이 뷰의 검색·컬럼 필터 초기화 (선택된 IP/모드 유지)">↺ 초기화</button>
+              <div class="search-wrap">
+                <input id="ipv-search" class="search-input" type="text"
+                       placeholder='검색  (예: 200  !304  ="GET")'
+                       title='포함: 200 · 제외: !304 · 정확히: ="GET" · 공백 포함은 "따옴표"'
+                       autocomplete="off" spellcheck="false" />
+                <button id="ipv-search-clear" class="btn-icon hidden">×</button>
+              </div>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <div id="ipv-records" class="data-table"></div>
+          </div>
+          <div class="pagination">
+            <button id="ipv-btn-prev" class="btn btn-ghost" disabled>‹ 이전</button>
+            <span   id="ipv-page-info" class="page-info">1 / 1</span>
+            <button id="ipv-btn-next" class="btn btn-ghost" disabled>다음 ›</button>
+            <span   id="ipv-pagination-info" class="pagination-count"></span>
+          </div>
+          <div id="ipv-empty" class="ipv-empty hidden">
+            왼쪽에서 IP를 선택하면 해당 IP의 웹 로그 기록이 표시됩니다.
+          </div>
+        </main>
+      </div>
+
       <!-- 아티팩트 뷰 (대시보드 + 타입 필터 + 테이블) -->
       <div id="artifact-view" class="artifact-view hidden">
 
@@ -79,6 +129,8 @@
             </div>
           </div>
           <div class="toolbar-right">
+            <button id="artifact-reset-filters" class="btn btn-ghost btn-reset"
+                    title="검색·타입·상태·컬럼 필터 모두 초기화 (정렬은 유지)">↺ 초기화</button>
             <div class="search-wrap">
               <input id="artifact-search" class="search-input" type="text"
                      placeholder='검색  (예: error  !debug  ="2026-02-02 01:01")'
@@ -134,6 +186,8 @@
             </div>
           </div>
           <div class="toolbar-right">
+            <button id="btn-reset-filters" class="btn btn-ghost btn-reset"
+                    title="검색·날짜·컬럼 필터 모두 초기화 (정렬은 유지)">↺ 초기화</button>
             <div class="search-wrap">
               <input id="search-input" class="search-input" type="text"
                      placeholder='검색  (예: error  !debug  ="2026-02-02 01:01")'

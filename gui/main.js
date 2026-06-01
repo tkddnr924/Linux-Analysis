@@ -691,6 +691,113 @@ ipcMain.handle('db:getGenericDashboard', (_e, table) => {
   } catch { return null }
 })
 
+// ── 웹 로그 IP 뷰 헬퍼 ───────────────────────────────
+// 웹 로그 4개 테이블의 IP 컬럼/UNION 가능한 컬럼 매핑.
+// 존재하지 않는 테이블은 자동 스킵.
+const _WEB_LOG_SRC = [
+  { table: 'apache2',       ip: 'src_ip'    },
+  { table: 'nginx',         ip: 'src_ip'    },
+  { table: 'apache2_error', ip: 'client_ip' },
+  { table: 'nginx_error',   ip: 'client_ip' },
+]
+const _WEB_TABLES_EXIST = () => _WEB_LOG_SRC.filter(s => {
+  try { return !!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(s.table) }
+  catch { return false }
+})
+
+// ── IPC: 웹 로그 4개 테이블에서 IP 중복제거 + 카운트 ──
+ipcMain.handle('db:getWebIps', () => {
+  if (!db) return []
+  const counts = new Map()    // ip → totalCount
+  for (const s of _WEB_TABLES_EXIST()) {
+    try {
+      const rows = db.prepare(
+        `SELECT "${s.ip}" AS ip, COUNT(*) AS cnt FROM "${s.table}"
+         WHERE "${s.ip}" IS NOT NULL AND "${s.ip}" NOT IN ('','-','?','0.0.0.0')
+         GROUP BY "${s.ip}"`
+      ).all()
+      for (const { ip, cnt } of rows) counts.set(ip, (counts.get(ip) || 0) + cnt)
+    } catch { /* 컬럼 미존재 등 — 스킵 */ }
+  }
+  return [...counts.entries()]
+    .map(([ip, cnt]) => ({ ip, cnt }))
+    .sort((a, b) => b.cnt - a.cnt)
+})
+
+// ── IPC: 선택된 IP/CIDR 의 웹 로그 records UNION (페이지네이션 + 정렬 + 컬럼 필터) ─
+//   selector: { mode: 'exact'|'prefix', value: '1.2.3.4' | '1.2.3.' | '1.2.' }
+// 모든 테이블의 공통 컬럼만 UNION (각 테이블의 고유 컬럼은 NULL 로 채움).
+ipcMain.handle('db:getWebRecords', (_e, { selector, limit, offset, sortCol, sortDir, search, colFilters }) => {
+  const empty = { rows: [], total: 0, columns: [] }
+  if (!db || !selector?.value) return empty
+
+  // ip 매칭 조건 (정확 = / 접두어 LIKE) — 각 테이블의 ip 컬럼에 동일 패턴 적용
+  const ipPredicate = (col) => selector.mode === 'prefix'
+    ? { sql: `"${col}" LIKE ?`, param: selector.value + '%' }
+    : { sql: `"${col}" = ?`,    param: selector.value }
+
+  // 공통 컬럼 (UNION 형태로 노출)
+  const COMMON = ['source', 'date_time', 'ip', 'status', 'method', 'uri', 'user_agent']
+  const present = _WEB_TABLES_EXIST()
+  if (!present.length) return empty
+
+  // 각 테이블별 SELECT — 컬럼이 없으면 NULL.
+  const subqueries = []
+  const subparams  = []
+  for (const s of present) {
+    try {
+      const cols = db.prepare(`PRAGMA table_info("${s.table}")`).all().map(r => r.name)
+      const pick = (c) => cols.includes(c) ? `"${c}"` : 'NULL'
+      const pred = ipPredicate(s.ip)
+      subqueries.push(`SELECT
+        '${s.table}' AS source,
+        ${pick('date_time')} AS date_time,
+        "${s.ip}" AS ip,
+        ${pick('status')} AS status,
+        ${pick('method')} AS method,
+        ${pick('uri')} AS uri,
+        ${pick('user_agent')} AS user_agent
+        FROM "${s.table}" WHERE ${pred.sql}`)
+      subparams.push(pred.param)
+    } catch { /* skip */ }
+  }
+  if (!subqueries.length) return empty
+
+  const union = subqueries.join(' UNION ALL ')
+
+  // 추가 조건 (검색 / colFilters) — UNION 의 결과에 부착
+  const conds = []
+  const condParams = []
+  if (search && search.trim()) {
+    const { clause, params: sp } = buildSearchCondition(COMMON, search)
+    if (clause) { conds.push(clause); condParams.push(...sp) }
+  }
+  if (colFilters && typeof colFilters === 'object') {
+    for (const [col, val] of Object.entries(colFilters)) {
+      if (val && val.trim() && COMMON.includes(col)) {
+        const { clause, params: cp } = buildColumnCondition(col, val)
+        if (clause) { conds.push(clause); condParams.push(...cp) }
+      }
+    }
+  }
+  const where = conds.length ? `WHERE ${conds.join(' AND ')}` : ''
+
+  // 정렬 — sortCol 미지정이면 date_time ASC
+  let order = 'ORDER BY "date_time" ASC'
+  if (sortCol && COMMON.includes(sortCol)) {
+    order = `ORDER BY "${sortCol}" ${sortDir === 'DESC' ? 'DESC' : 'ASC'}`
+  }
+
+  try {
+    const totalRow = db.prepare(`SELECT COUNT(*) AS c FROM (${union}) ${where}`).get(...subparams, ...condParams)
+    const rows    = db.prepare(`SELECT * FROM (${union}) ${where} ${order} LIMIT ? OFFSET ?`)
+                       .all(...subparams, ...condParams, limit, offset)
+    return { rows, total: totalRow.c, columns: COMMON }
+  } catch (e) {
+    return { rows: [], total: 0, columns: COMMON, error: e.message }
+  }
+})
+
 // ── IPC: IP enrich 캐시 일괄 로드 (DB 열 때 1회) ─────
 // ipinfo 테이블 전체를 {ip: {country_code, country, asn, as_name, vpn_suspect}} 맵으로.
 ipcMain.handle('db:getIpInfo', () => {

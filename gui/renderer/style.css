@@ -138,6 +138,15 @@ html, body {
   border-color: var(--border);
 }
 .btn-ghost:hover  { background: var(--surface-2); color: var(--text); }
+
+/* 원클릭 필터 초기화 — 작은 ghost 버튼 */
+.btn-reset {
+  padding: 4px 10px;
+  font-size: 11.5px;
+  margin-right: 6px;
+  white-space: nowrap;
+}
+.btn-reset:hover { color: var(--accent); border-color: var(--accent); }
 .btn-ghost:disabled { opacity: .4; cursor: default; }
 
 .btn-lg { padding: 10px 24px; font-size: 14px; border-radius: var(--radius); }
@@ -619,6 +628,131 @@ body.col-resizing * { cursor: col-resize !important; user-select: none !importan
 .data-grid tbody tr { cursor: pointer; transition: background .1s; }
 .data-grid tbody tr:nth-child(even) { background: var(--row-alt); }
 .data-grid tbody tr:hover           { background: var(--row-hover); }
+
+/* ── IP 별 기록 뷰 (split 레이아웃) ─────────────────── */
+.ip-view {
+  display: flex;
+  flex: 1;
+  min-height: 0;          /* flexbox 자식의 내부 스크롤 활성화 */
+  overflow: hidden;
+}
+.ipv-left {
+  width: 340px;
+  min-width: 260px;
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid var(--border);
+  background: var(--surface-2);
+}
+.ipv-header {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border-light);
+  background: var(--surface);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.ipv-modes { display: flex; gap: 4px; }
+.ipv-mode-btn {
+  flex: 1;
+  padding: 5px 8px;
+  font-size: 11.5px;
+  font-family: var(--font-base);
+  font-weight: 600;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--surface);
+  color: var(--text-2);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background .12s, border-color .12s, color .12s;
+}
+.ipv-mode-btn:hover  { border-color: var(--accent); color: var(--accent); }
+.ipv-mode-btn.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+.ipv-search-wrap { display: flex; }
+.ipv-search-wrap .search-input { width: 100%; }
+.ipv-stats {
+  font-size: 10.5px;
+  color: var(--text-muted);
+  letter-spacing: .04em;
+}
+
+.ipv-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 4px;
+}
+.ipv-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+  transition: background .1s;
+}
+.ipv-row:hover  { background: var(--row-hover); }
+.ipv-row.active {
+  background: var(--accent-light);
+  outline: 1px solid var(--accent-muted);
+  outline-offset: -1px;
+}
+.ipv-row .ip-flag { margin-right: 2px; }
+.ipv-row-key {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--text);
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ipv-row-cnt {
+  font-variant-numeric: tabular-nums;
+  font-size: 10.5px;
+  font-weight: 700;
+  color: var(--text-muted);
+  background: var(--surface-2);
+  padding: 1px 7px;
+  border-radius: 999px;
+}
+.ipv-row.active .ipv-row-cnt {
+  color: var(--accent);
+  background: #fff;
+}
+.ipv-row-sub {
+  font-size: 10px;
+  color: var(--text-muted);
+  margin-left: 4px;
+  font-family: var(--font-base);
+  max-width: 100px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ipv-right {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.ipv-empty {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+  font-size: 13px;
+  padding: 40px;
+  text-align: center;
+}
 
 /* IP enrich — 국기 + VPN 의심 배지 */
 .ip-flag {

@@ -52,6 +52,12 @@ contextBridge.exposeInMainWorld('api', {
   /** IP enrich 캐시 — {ip: {cc, cn, asn, co, vpn}} */
   getIpInfo: () => ipcRenderer.invoke('db:getIpInfo'),
 
+  /** 웹 로그 4개 테이블 IP 중복제거 + 카운트 → [{ip, cnt}] */
+  getWebIps: () => ipcRenderer.invoke('db:getWebIps'),
+
+  /** 선택된 IP/CIDR 의 웹 로그 records UNION — pagination + 정렬 + 컬럼 필터 */
+  getWebRecords: (opts) => ipcRenderer.invoke('db:getWebRecords', opts),
+
   /**
    * 전체 테이블 통합 검색
    * @returns {{ table, columns, rows, total }[]}

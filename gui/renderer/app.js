@@ -81,6 +81,18 @@ const A = {
   totalRows: 0, columns: [],
 }
 
+// IP view 상태
+const I = {
+  mode: 'all',            // 'all' | 'c' | 'b'
+  ips: [],                // 원본 IP 목록 [{ip, cnt}]
+  groups: [],             // 표시용 그룹 (mode 에 따라 IP 자체 또는 CIDR prefix)
+  listFilter: '',         // 왼쪽 패널의 IP 필터
+  selected: null,         // { mode: 'exact'|'prefix', value, label }
+  page: 0, search: '', sortCol: null, sortDir: 'ASC',
+  colFilters: {}, colWidths: {},
+  totalRows: 0, columns: [],
+}
+
 // ── DOM 헬퍼 ──────────────────────────────────────────
 const $   = id => document.getElementById(id)
 const esc = s  => String(s ?? '')
@@ -195,12 +207,25 @@ async function init() {
   $('tl-date-from').addEventListener('change', onDateChange)
   $('tl-date-to').addEventListener('change', onDateChange)
   $('tl-date-clear').addEventListener('click', clearDateFilter)
+  $('btn-reset-filters').addEventListener('click', resetTableFilters)
 
   $('artifact-search').addEventListener('input', debounce(onArtifactSearch, 300))
   $('artifact-search-clear').addEventListener('click', clearArtifactSearch)
   $('artifact-btn-prev').addEventListener('click', ()=>goArtifactPage(-1))
   $('artifact-btn-next').addEventListener('click', ()=>goArtifactPage(1))
   $('artifact-filter-clear').addEventListener('click', clearArtifactTypeFilter)
+  $('artifact-reset-filters').addEventListener('click', resetArtifactFilters)
+
+  // IP 별 기록 뷰
+  document.querySelectorAll('.ipv-mode-btn').forEach(b =>
+    b.addEventListener('click', () => switchIpvMode(b.dataset.mode))
+  )
+  $('ipv-list-search').addEventListener('input', debounce(onIpvListSearch, 200))
+  $('ipv-search').addEventListener('input', debounce(onIpvSearch, 300))
+  $('ipv-search-clear').addEventListener('click', clearIpvSearch)
+  $('ipv-btn-prev').addEventListener('click', () => goIpvPage(-1))
+  $('ipv-btn-next').addEventListener('click', () => goIpvPage(1))
+  $('ipv-reset-filters').addEventListener('click', resetIpvFilters)
 
   $('modal-close').addEventListener('click', closeModal)
   $('modal-overlay').addEventListener('click', closeModal)
@@ -270,9 +295,19 @@ async function renderSidebar() {
       </button>`
     html += '</div>'
   }
+  // 분석 그룹 — 특수 뷰 (DB 테이블 아님)
+  html += `<div class="sidebar-group"><div class="sidebar-group-label">분석</div>
+    <button class="sidebar-item" data-special="ip-view">
+      <span class="si-label">IP 별 기록</span>
+    </button>
+  </div>`
+
   $('sidebar-content').innerHTML = html
   $('sidebar-content').querySelectorAll('.sidebar-item').forEach(btn =>
-    btn.addEventListener('click', () => selectTable(btn.dataset.table))
+    btn.addEventListener('click', () => {
+      if (btn.dataset.special === 'ip-view') selectIpView()
+      else selectTable(btn.dataset.table)
+    })
   )
   const first = tables.find(t=>t.name==='sysinfo') || tables[0]
   if (first) selectTable(first.name)
@@ -289,7 +324,7 @@ async function selectTable(tableName) {
   setActiveItem(tableName)
   show('welcome', false); show('sysinfo-view', false)
   show('tab-empty', false); show('table-view', false)
-  show('artifact-view', false)
+  show('artifact-view', false); show('ip-view', false)
 
   if (tableName === 'sysinfo')         { await renderSysinfo(); return }
   if (ARTIFACT_TABLES.has(tableName))  { await selectArtifact(tableName); return }
@@ -365,6 +400,36 @@ function clearDateFilter() {
   $('tl-date-from').value=''; $('tl-date-to').value=''
   S.dateFrom=''; S.dateTo=''
   $('tl-date-clear').classList.add('hidden'); S.page=0; loadTable()
+}
+
+// 원클릭 초기화 — 검색·날짜·컬럼필터 모두 클리어. 정렬(sortCol/Dir) 은 보존.
+function resetTableFilters() {
+  S.search   = ''
+  S.dateFrom = ''; S.dateTo = ''
+  S.colFilters = {}
+  S.page     = 0
+  $('search-input').value     = ''
+  $('btn-clear').classList.add('hidden')
+  $('tl-date-from').value     = ''
+  $('tl-date-to').value       = ''
+  $('tl-date-clear').classList.add('hidden')
+  loadTable()
+}
+
+function resetArtifactFilters() {
+  A.search           = ''
+  A.typeFilters      = []
+  A.activeQuickGroup = null
+  A.statusFilter     = null
+  A.methodFilters    = []
+  A.colFilters       = {}
+  A.page             = 0
+  $('artifact-search').value = ''
+  $('artifact-search-clear').classList.add('hidden')
+  clearArtifactFilterTag()
+  $('artifact-type-chips')?.querySelectorAll('.type-chip').forEach(c => c.classList.remove('active'))
+  $('artifact-quick-filters')?.querySelectorAll('.quick-btn').forEach(b => b.classList.remove('active'))
+  loadArtifactTable()
 }
 
 // ── 공통(자동) 대시보드 ───────────────────────────────
@@ -449,6 +514,7 @@ async function selectArtifact(tableName) {
   $('artifact-search-clear').classList.add('hidden')
   $('artifact-title').textContent = TABLE_META[tableName]?.label || tableName
 
+  show('ip-view', false)
   show('artifact-view', true)
   clearArtifactFilterTag()
 
@@ -527,6 +593,172 @@ function clearArtifactTypeFilter() {
 }
 function clearArtifactFilterTag() {
   show('artifact-filter-tag', false); $('artifact-filter-label').textContent = ''
+}
+
+// ── IP 별 기록 뷰 ────────────────────────────────────
+const withIpvLoading = makeLoader('ipv-records')
+
+// 진입 — 사이드바에서 'IP 별 기록' 클릭 시
+async function selectIpView() {
+  setActiveItem(null)
+  document.querySelectorAll('.sidebar-item[data-special="ip-view"]')
+    .forEach(b => b.classList.add('active'))
+  show('welcome', false); show('sysinfo-view', false)
+  show('tab-empty', false); show('table-view', false); show('artifact-view', false)
+  show('ip-view', true)
+
+  // 상태 초기화
+  I.mode = 'all'; I.selected = null; I.listFilter = ''
+  I.page = 0; I.search = ''; I.sortCol = null; I.sortDir = 'ASC'
+  I.colFilters = {}; I.colWidths = {}
+  $('ipv-list-search').value = ''
+  $('ipv-search').value = ''
+  $('ipv-search-clear').classList.add('hidden')
+  $('ipv-title').textContent = 'IP를 선택하세요'
+  $('ipv-badge').textContent = '0건'
+  $('ipv-records').innerHTML = ''
+  show('ipv-empty', true)
+  setActiveModeBtn('all')
+
+  // 백엔드에서 IP 집계
+  I.ips = (await window.api.getWebIps()) || []
+  computeGroups()
+  renderIpList()
+}
+
+// 모드 (전체/C/B) 에 따라 표시용 그룹 산출 ─ groups: [{key, count, sample, mode, value}]
+function computeGroups() {
+  if (I.mode === 'all') {
+    I.groups = I.ips.map(({ip, cnt}) => ({
+      key: ip, count: cnt, sample: ip,
+      selector: { mode: 'exact', value: ip, label: ip },
+    }))
+    return
+  }
+  // C 클래스: 앞 3옥텟,  B 클래스: 앞 2옥텟
+  const octets = I.mode === 'c' ? 3 : 2
+  const map = new Map()  // prefix → {count, ips:Set}
+  for (const {ip, cnt} of I.ips) {
+    const parts = ip.split('.')
+    if (parts.length !== 4) continue   // IPv6 등은 'all' 에서만 보임
+    const prefix = parts.slice(0, octets).join('.') + '.'
+    const cidrLabel = parts.slice(0, octets).join('.') + (octets === 3 ? '.0/24' : '.0.0/16')
+    const entry = map.get(prefix) || { count: 0, ips: new Set(), label: cidrLabel }
+    entry.count += cnt
+    entry.ips.add(ip)
+    map.set(prefix, entry)
+  }
+  I.groups = [...map.entries()]
+    .map(([prefix, {count, ips, label}]) => ({
+      key: label, count, sample: `${ips.size}개 IP`,
+      selector: { mode: 'prefix', value: prefix, label },
+    }))
+    .sort((a, b) => b.count - a.count)
+}
+
+function setActiveModeBtn(mode) {
+  document.querySelectorAll('.ipv-mode-btn').forEach(b =>
+    b.classList.toggle('active', b.dataset.mode === mode))
+}
+
+function renderIpList() {
+  const el = $('ipv-list')
+  const q = I.listFilter.trim().toLowerCase()
+  const filtered = q ? I.groups.filter(g => g.key.toLowerCase().includes(q)) : I.groups
+  $('ipv-stats').textContent =
+    I.mode === 'all'
+      ? `${filtered.length.toLocaleString()} / ${I.groups.length.toLocaleString()} IP`
+      : `${filtered.length.toLocaleString()} 네트워크 (총 ${I.ips.length.toLocaleString()} IP)`
+
+  if (!filtered.length) {
+    el.innerHTML = '<div class="ipv-empty" style="padding:24px">목록이 비어있습니다.</div>'
+    return
+  }
+
+  el.innerHTML = filtered.map((g, idx) => {
+    const isActive = I.selected && I.selected.value === g.selector.value && I.selected.mode === g.selector.mode
+    // 'all' 모드에서만 국기 표시 (IP 단위 enrich)
+    const flagHtml = (I.mode === 'all' && IP_INFO[g.key])
+      ? `<span class="ip-flag" title="${esc(IP_INFO[g.key].cn || IP_INFO[g.key].cc)}">${flagOf(IP_INFO[g.key].cc)}</span>`
+      : ''
+    const subHtml = I.mode === 'all'
+      ? (IP_INFO[g.key]?.co ? `<span class="ipv-row-sub" title="${esc(IP_INFO[g.key].co)}">${esc(IP_INFO[g.key].co)}</span>` : '')
+      : `<span class="ipv-row-sub">${esc(g.sample)}</span>`
+    return `<div class="ipv-row${isActive ? ' active' : ''}" data-idx="${idx}">
+      ${flagHtml}<span class="ipv-row-key">${esc(g.key)}</span>${subHtml}<span class="ipv-row-cnt">${g.count.toLocaleString()}</span>
+    </div>`
+  }).join('')
+
+  // 클릭 → 선택
+  el.querySelectorAll('.ipv-row').forEach(row => row.addEventListener('click', () => {
+    const g = filtered[parseInt(row.dataset.idx, 10)]
+    selectIpEntry(g)
+  }))
+}
+
+function selectIpEntry(group) {
+  I.selected = group.selector
+  I.page = 0
+  // sort/filter 는 유지 (다른 IP 봐도 정렬·검색 컨텍스트 보존)
+  renderIpList()   // active 상태 갱신
+  $('ipv-title').textContent = group.key
+  show('ipv-empty', false)
+  loadIpRecords()
+}
+
+async function loadIpRecords() {
+  if (!I.selected) return
+  await withIpvLoading(async () => {
+    const { rows, total, columns, error } = await window.api.getWebRecords({
+      selector: I.selected,
+      limit: PAGE_SIZE, offset: I.page * PAGE_SIZE,
+      sortCol: I.sortCol, sortDir: I.sortDir,
+      search: I.search, colFilters: I.colFilters,
+    })
+    if (error) { setStatus(`오류: ${error}`, true); return }
+    I.totalRows = total; I.columns = columns
+    $('ipv-badge').textContent = `${total.toLocaleString()}건`
+    renderTableData('ipv-records', columns, rows, loadIpRecords)
+    renderPagination('ipv-btn-prev','ipv-btn-next','ipv-page-info','ipv-pagination-info', total, I)
+    setStatus(`${I.selected.label}: ${total.toLocaleString()}건`)
+  })
+}
+
+function onIpvSearch() {
+  I.search = $('ipv-search').value
+  $('ipv-search-clear').classList.toggle('hidden', !I.search)
+  I.page = 0; loadIpRecords()
+}
+function clearIpvSearch() {
+  $('ipv-search').value = ''; I.search = ''
+  $('ipv-search-clear').classList.add('hidden'); I.page = 0; loadIpRecords()
+}
+function goIpvPage(d) { I.page = Math.max(0, I.page + d); loadIpRecords() }
+
+function onIpvListSearch() {
+  I.listFilter = $('ipv-list-search').value
+  renderIpList()
+}
+
+function resetIpvFilters() {
+  I.search = ''; I.colFilters = {}; I.page = 0
+  $('ipv-search').value = ''
+  $('ipv-search-clear').classList.add('hidden')
+  if (I.selected) loadIpRecords()
+}
+
+function switchIpvMode(mode) {
+  if (I.mode === mode) return
+  I.mode = mode
+  setActiveModeBtn(mode)
+  I.selected = null
+  I.page = 0
+  $('ipv-title').textContent = 'IP를 선택하세요'
+  $('ipv-badge').textContent = '0건'
+  $('ipv-records').innerHTML = ''
+  show('ipv-empty', true)
+  computeGroups()
+  renderIpList()
 }
 
 // ── Syslog 대시보드 ───────────────────────────────────
