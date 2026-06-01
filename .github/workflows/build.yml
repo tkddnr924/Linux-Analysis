@@ -6,6 +6,12 @@ on:
       - 'v*'          # v1.0.0 태그 push 시 자동 빌드
   workflow_dispatch:  # Actions 탭에서 수동 실행 가능
 
+# Node 20 deprecation 대응 — JS 액션을 Node 24 런타임에서 실행 (2026-06-16 강제 전환의 조기 opt-in).
+# 이걸 켜두면 action.yml 이 node20 으로 선언된 액션(upload/download-artifact 등)도 Node 24 에서 돌아
+# deprecation 경고가 사라지고, 강제 전환일에 대비한 호환성 검증도 함께 됨.
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+
 jobs:
   # ── Python 분석기 → .exe ──────────────────────────────
   build-python:
@@ -13,9 +19,9 @@ jobs:
     runs-on: windows-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
 
@@ -39,9 +45,9 @@ jobs:
     runs-on: windows-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: '22'
 
@@ -76,7 +82,7 @@ jobs:
           path: artifacts/
 
       - name: Create Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: artifacts/**/*
           generate_release_notes: true
