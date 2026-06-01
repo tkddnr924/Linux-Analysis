@@ -101,30 +101,33 @@ def _vhost_from_path(file_path: Path) -> tuple[str, bool]:
 # [^"]* 는 \" 를 인식 못해 UA가 깨지므로 (?:[^"\\]|\\.)* 패턴 사용.
 _Q = r'(?:[^"\\]|\\.)*'
 
+# 외부 LogFormat 대응 — IP 뒤의 ident/userid 토큰 수, 인터필드 공백(탭/다중),
+# bytes 이후 사이드 필드(응답시간 등) 모두 가변. 핵심 strict 부분은
+# IP / [time] / "request" / status / bytes. 나머지(rest) 에서 따옴표 필드만
+# findall 로 추출해 위치 기반으로 referer / ua 에 할당.
 _COMBINED_RE = re.compile(
-    r"^(?P<src_ip>\S+)"
-    r" \S+ \S+ "
+    r"^\s*(?P<src_ip>\S+)"
+    r"[^[]*"
     r"\[(?P<datetime>[^\]]+)\]"
-    rf' "(?P<request>{_Q})"'
-    r" (?P<status>\d{3})"
-    r" (?P<bytes>\S+)"
-    rf'(?: "(?P<referer>{_Q})")?'
-    rf'(?: "(?P<ua>{_Q})")?'
+    rf'\s+"(?P<request>{_Q})"'
+    r"\s+(?P<status>\d{3})"
+    r"\s+(?P<bytes>\S+)"
+    r"(?P<rest>.*)$"
 )
 
 _VHOST_RE = re.compile(
-    r"^(?P<vhost_port>\S+?:\d+) "
-    r"(?P<src_ip>\S+)"
-    r" \S+ \S+ "
+    r"^\s*(?P<vhost_port>\S+?:\d+)"
+    r"\s+(?P<src_ip>\S+)"
+    r"[^[]*"
     r"\[(?P<datetime>[^\]]+)\]"
-    rf' "(?P<request>{_Q})"'
-    r" (?P<status>\d{3})"
-    r" (?P<bytes>\S+)"
-    rf'(?: "(?P<referer>{_Q})")?'
-    rf'(?: "(?P<ua>{_Q})")?'
+    rf'\s+"(?P<request>{_Q})"'
+    r"\s+(?P<status>\d{3})"
+    r"\s+(?P<bytes>\S+)"
+    r"(?P<rest>.*)$"
 )
 
-_REQUEST_RE = re.compile(r"^(\S+)\s+(\S+)\s+(\S+)$")
+_REQUEST_RE      = re.compile(r"^(\S+)\s+(\S+)\s+(\S+)$")
+_QUOTED_FIELD_RE = re.compile(rf'"({_Q})"')
 
 # LogFormat 이스케이프 해제: \" → ",  \\ → \  (단일 패스)
 _UNESC_RE = re.compile(r'\\(.)')
@@ -168,8 +171,10 @@ class Apache2LogEntry:
         self.status     = int(m.group("status"))
         raw_bytes       = m.group("bytes")
         self.bytes_sent = int(raw_bytes) if raw_bytes and raw_bytes != "-" else 0
-        self.referer    = _unesc(m.group("referer") or "")
-        self.user_agent = _unesc(m.group("ua") or "")
+        # bytes 이후 'rest' 에서 모든 따옴표 필드 추출 — 트레일링 위치 가변 대응
+        quoted = _QUOTED_FIELD_RE.findall(m.group("rest") or "")
+        self.referer    = _unesc(quoted[0]) if len(quoted) >= 1 else ""
+        self.user_agent = _unesc(quoted[1]) if len(quoted) >= 2 else ""
         request_raw     = _unesc(m.group("request") or "")
         req = _REQUEST_RE.match(request_raw)
         if req:

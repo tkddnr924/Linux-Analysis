@@ -63,25 +63,23 @@ def _parse_access_dt(raw: str) -> str:
     return f"{year}-{_MONTHS.get(mon, '00')}-{day} {time}.000"
 
 
-# nginx 가 따옴표 필드 안의 " 를 \" 로 이스케이프하므로 [^"]* 대신
-# (?:[^"\\]|\\.)* 패턴을 사용. 추가로 nginx 흔한 커스텀 포맷
-#   ... "$http_referer" "$http_user_agent" "$http_x_forwarded_for"
-# 의 3번째 따옴표 필드(xff) 도 캡처.
+# nginx 따옴표 필드 안의 " 는 \" 로 이스케이프. 외부 LogFormat 변종에도
+# 견디도록 IP 뒤 ident/userid 와 인터필드 공백을 유연하게, bytes 이후는
+# 통째로 캡처해 findall 로 따옴표 필드만 추출(위치 기반: 0=referer, 1=ua, 2=xff).
 _Q = r'(?:[^"\\]|\\.)*'
 
 _ACCESS_RE = re.compile(
-    r'(?P<src_ip>\S+)'
-    r' \S+ \S+ '
+    r'^\s*(?P<src_ip>\S+)'
+    r'[^[]*'
     r'\[(?P<datetime>[^\]]+)\]'
-    rf' "(?P<request>{_Q})"'
-    r' (?P<status>\d{3})'
-    r' (?P<bytes>\S+)'
-    rf'(?: "(?P<referer>{_Q})")?'
-    rf'(?: "(?P<user_agent>{_Q})")?'
-    rf'(?: "(?P<xff>{_Q})")?'
+    rf'\s+"(?P<request>{_Q})"'
+    r'\s+(?P<status>\d{3})'
+    r'\s+(?P<bytes>\S+)'
+    r'(?P<rest>.*)$'
 )
 
-_REQUEST_RE = re.compile(r'^(\S+)\s+(\S+)\s+(\S+)$')
+_REQUEST_RE      = re.compile(r'^(\S+)\s+(\S+)\s+(\S+)$')
+_QUOTED_FIELD_RE = re.compile(rf'"({_Q})"')
 
 # LogFormat 이스케이프 해제: \" → ",  \\ → \
 _UNESC_RE = re.compile(r'\\(.)')
@@ -117,9 +115,11 @@ class NginxLogEntry:
         self.status     = int(m.group("status"))
         raw_bytes       = m.group("bytes")
         self.bytes_sent = int(raw_bytes) if raw_bytes and raw_bytes != "-" else 0
-        self.referer    = _unesc(m.group("referer")    or "")
-        self.user_agent = _unesc(m.group("user_agent") or "")
-        self.xff        = _unesc(m.group("xff")        or "")
+        # bytes 이후 모든 따옴표 필드를 위치 기반으로 매핑
+        quoted = _QUOTED_FIELD_RE.findall(m.group("rest") or "")
+        self.referer    = _unesc(quoted[0]) if len(quoted) >= 1 else ""
+        self.user_agent = _unesc(quoted[1]) if len(quoted) >= 2 else ""
+        self.xff        = _unesc(quoted[2]) if len(quoted) >= 3 else ""
 
         request_raw = _unesc(m.group("request") or "")
         req = _REQUEST_RE.match(request_raw)
