@@ -468,9 +468,39 @@ html, body {
 
 /* ── 데이터 테이블 ────────────────────────────────── */
 .table-wrap {
+  position: relative;        /* 로딩 스피너의 기준 */
   flex: 1;
   overflow: auto;
   background: var(--surface);
+}
+
+/* 쿼리 진행 중 — 반투명 오버레이 + 가운데 회전 스피너 */
+.table-wrap.is-loading::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: color-mix(in srgb, var(--surface) 60%, transparent);
+  z-index: 4;
+  pointer-events: none;
+}
+.table-wrap.is-loading::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 36px;
+  height: 36px;
+  margin: -18px 0 0 -18px;
+  border: 3px solid var(--border-light);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: la-spin .8s linear infinite;
+  z-index: 5;
+  pointer-events: none;
+}
+@keyframes la-spin {
+  from { transform: rotate(0); }
+  to   { transform: rotate(360deg); }
 }
 
 .data-table { min-width: 100%; }

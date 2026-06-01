@@ -104,6 +104,29 @@ function debounce(fn, ms) {
 }
 function fmtDt(dt) { return dt ? dt.slice(0,16).replace('T',' ') : '—' }
 
+// ── 비동기 작업 로딩 인디케이터 ───────────────────────
+// 컨테이너 ID 별로 .table-wrap 에 .is-loading 클래스를 토글.
+// 100ms 후에만 표시 → 빠른 쿼리(< 100ms)에선 깜빡임 없음.
+// latest-only 트래킹으로 중복 호출 race 안전.
+function makeLoader(containerId) {
+  let latest = 0
+  return async function withLoading(fn) {
+    const wrap = $(containerId)?.closest('.table-wrap')
+    const myId = ++latest
+    const timer = setTimeout(() => {
+      if (myId === latest) wrap?.classList.add('is-loading')
+    }, 100)
+    try {
+      return await fn()
+    } finally {
+      clearTimeout(timer)
+      if (myId === latest) wrap?.classList.remove('is-loading')
+    }
+  }
+}
+const withTableLoading    = makeLoader('data-table')
+const withArtifactLoading = makeLoader('artifact-data-table')
+
 // ── IP enrich 캐시 (IPinfo Lite) ──────────────────────
 // DB 열 때 1회 로드. {ip: {cc, cn, asn, co, vpn}}
 let IP_INFO = {}
@@ -300,25 +323,27 @@ async function setupDateFilter(tableName) {
 
 async function loadTable() {
   if (!S.currentTable) return
-  const { rows, total, columns, error } = await window.api.getTableData({
-    table: S.currentTable, search: S.search, limit: PAGE_SIZE,
-    offset: S.page * PAGE_SIZE, sortCol: S.sortCol, sortDir: S.sortDir,
-    dateFrom: S.dateFrom, dateTo: S.dateTo, colFilters: S.colFilters,
-  })
-  if (error) { setStatus(`오류: ${error}`, true); return }
-  S.totalRows = total; S.columns = columns
+  await withTableLoading(async () => {
+    const { rows, total, columns, error } = await window.api.getTableData({
+      table: S.currentTable, search: S.search, limit: PAGE_SIZE,
+      offset: S.page * PAGE_SIZE, sortCol: S.sortCol, sortDir: S.sortDir,
+      dateFrom: S.dateFrom, dateTo: S.dateTo, colFilters: S.colFilters,
+    })
+    if (error) { setStatus(`오류: ${error}`, true); return }
+    S.totalRows = total; S.columns = columns
 
-  if (!rows.length && !S.search && !S.dateFrom && !S.dateTo) {
-    show('table-view', false); show('tab-empty', true)
-    $('tab-empty-title').textContent = TABLE_META[S.currentTable]?.label || S.currentTable
-    $('tab-empty-desc').textContent  = '이 로그 파일이 수집되지 않았거나 파싱 데이터가 없습니다.'
-    return
-  }
-  show('table-view', true); show('tab-empty', false)
-  $('total-badge').textContent = `${total.toLocaleString()}건`
-  renderTableData('data-table', columns, rows, loadTable)
-  renderPagination('btn-prev','btn-next','page-info','pagination-info', total, S)
-  setStatus(`${TABLE_META[S.currentTable]?.label||S.currentTable}: ${total.toLocaleString()}건`)
+    if (!rows.length && !S.search && !S.dateFrom && !S.dateTo) {
+      show('table-view', false); show('tab-empty', true)
+      $('tab-empty-title').textContent = TABLE_META[S.currentTable]?.label || S.currentTable
+      $('tab-empty-desc').textContent  = '이 로그 파일이 수집되지 않았거나 파싱 데이터가 없습니다.'
+      return
+    }
+    show('table-view', true); show('tab-empty', false)
+    $('total-badge').textContent = `${total.toLocaleString()}건`
+    renderTableData('data-table', columns, rows, loadTable)
+    renderPagination('btn-prev','btn-next','page-info','pagination-info', total, S)
+    setStatus(`${TABLE_META[S.currentTable]?.label||S.currentTable}: ${total.toLocaleString()}건`)
+  })
 }
 
 function onSearch() {
@@ -447,18 +472,20 @@ async function loadAuthlogDashboard() {
 }
 
 async function loadArtifactTable() {
-  const { rows, total, columns, error } = await window.api.getTableData({
-    table: A.currentTable, search: A.search, limit: PAGE_SIZE,
-    offset: A.page * PAGE_SIZE, sortCol: A.sortCol, sortDir: A.sortDir,
-    typeFilters: A.typeFilters, colFilters: A.colFilters,
-    statusFilter: A.statusFilter, methodFilters: A.methodFilters,
+  await withArtifactLoading(async () => {
+    const { rows, total, columns, error } = await window.api.getTableData({
+      table: A.currentTable, search: A.search, limit: PAGE_SIZE,
+      offset: A.page * PAGE_SIZE, sortCol: A.sortCol, sortDir: A.sortDir,
+      typeFilters: A.typeFilters, colFilters: A.colFilters,
+      statusFilter: A.statusFilter, methodFilters: A.methodFilters,
+    })
+    if (error) { setStatus(`오류: ${error}`, true); return }
+    A.totalRows = total; A.columns = columns
+    $('artifact-badge').textContent = `${total.toLocaleString()}건`
+    renderTableData('artifact-data-table', columns, rows, loadArtifactTable)
+    renderPagination('artifact-btn-prev','artifact-btn-next','artifact-page-info','artifact-pagination-info', total, A)
+    setStatus(`${TABLE_META[A.currentTable]?.label||A.currentTable}: ${total.toLocaleString()}건`)
   })
-  if (error) { setStatus(`오류: ${error}`, true); return }
-  A.totalRows = total; A.columns = columns
-  $('artifact-badge').textContent = `${total.toLocaleString()}건`
-  renderTableData('artifact-data-table', columns, rows, loadArtifactTable)
-  renderPagination('artifact-btn-prev','artifact-btn-next','artifact-page-info','artifact-pagination-info', total, A)
-  setStatus(`${TABLE_META[A.currentTable]?.label||A.currentTable}: ${total.toLocaleString()}건`)
 }
 
 function onArtifactSearch() {
