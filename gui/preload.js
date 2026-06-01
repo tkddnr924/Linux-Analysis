@@ -49,6 +49,9 @@ contextBridge.exposeInMainWorld('api', {
   /** 공통(자동) 대시보드 — 전용 대시보드가 없는 테이블용 { tsCol, range, breakdowns, scanLimited } */
   getGenericDashboard: (table) => ipcRenderer.invoke('db:getGenericDashboard', table),
 
+  /** IP enrich 캐시 — {ip: {cc, cn, asn, co, vpn}} */
+  getIpInfo: () => ipcRenderer.invoke('db:getIpInfo'),
+
   /**
    * 전체 테이블 통합 검색
    * @returns {{ table, columns, rows, total }[]}

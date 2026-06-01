@@ -104,6 +104,39 @@ function debounce(fn, ms) {
 }
 function fmtDt(dt) { return dt ? dt.slice(0,16).replace('T',' ') : '—' }
 
+// ── IP enrich 캐시 (IPinfo Lite) ──────────────────────
+// DB 열 때 1회 로드. {ip: {cc, cn, asn, co, vpn}}
+let IP_INFO = {}
+
+// 셀에서 자동 enrich 하는 컬럼명
+const IP_COLUMNS = new Set(['src_ip', 'client_ip', 'addr', 'ip', 'xff'])
+
+// ISO 2자 국가코드 → 국기 emoji (Regional Indicator Symbol 두 글자 조합)
+function flagOf(cc) {
+  if (!cc || cc.length !== 2) return ''
+  const A = 0x1F1E6 - 0x41
+  const c0 = cc.toUpperCase().charCodeAt(0)
+  const c1 = cc.toUpperCase().charCodeAt(1)
+  if (c0 < 0x41 || c0 > 0x5A || c1 < 0x41 || c1 > 0x5A) return ''
+  return String.fromCodePoint(A + c0) + String.fromCodePoint(A + c1)
+}
+
+// IP 정보를 셀 HTML 로 — 국기 + 원본 IP + (선택) VPN 배지, 툴팁에 회사·국가
+function ipCellHtml(rawIp) {
+  const info = IP_INFO[rawIp]
+  if (!info) return `<td title="${esc(rawIp)}">${esc(rawIp)}</td>`
+  const flag = flagOf(info.cc)
+  const tip  = [
+    info.cn || '?',
+    info.co || '',
+    info.asn ? `(${info.asn})` : '',
+    info.vpn ? '· VPN/호스팅 의심' : '',
+  ].filter(Boolean).join(' ')
+  const vpnBadge = info.vpn ? `<span class="ip-vpn" title="VPN/Proxy/호스팅 의심 (AS 이름 휴리스틱)">VPN?</span>` : ''
+  const flagHtml = flag ? `<span class="ip-flag" title="${esc(info.cn || info.cc)}">${flag}</span>` : ''
+  return `<td title="${esc(tip)}">${flagHtml}${esc(rawIp)}${vpnBadge}</td>`
+}
+
 // 테이블에서 시간 컬럼 자동 탐지 (main.js 의 tsCol 규칙과 동일)
 function detectTsCol(columns) {
   if (columns.includes('date_time')) return 'date_time'
@@ -172,6 +205,7 @@ async function openDb() {
 }
 
 async function loadDb(filePath) {
+  IP_INFO = {}                                         // 이전 DB 잔재 초기화
   const r = await window.api.openDB(filePath)
   if (!r.success) { setStatus(`오류: ${r.error}`, true); return }
   const name = filePath.split(/[\\/]/).pop()
@@ -179,6 +213,7 @@ async function loadDb(filePath) {
   $('db-path').title = filePath
   setStatus(`${name} 열림`)
   show('welcome', false)
+  IP_INFO = (await window.api.getIpInfo()) || {}       // IP enrich 캐시 일괄 로드
   await renderSidebar()
 }
 
@@ -1117,9 +1152,13 @@ function renderTableData(containerId, columns, rows, reloadFn) {
     for (const row of rows) {
       tbody += '<tr>'
       for (const col of columns) {
-        const raw  = String(row[col] ?? '')
-        const cell = raw.length > 120 ? raw.slice(0, 120) + '…' : raw
-        tbody += `<td title="${esc(raw)}">${esc(cell)}</td>`
+        const raw = String(row[col] ?? '')
+        if (raw && IP_COLUMNS.has(col)) {
+          tbody += ipCellHtml(raw)               // 국기 + IP + VPN 배지
+        } else {
+          const cell = raw.length > 120 ? raw.slice(0, 120) + '…' : raw
+          tbody += `<td title="${esc(raw)}">${esc(cell)}</td>`
+        }
       }
       tbody += '</tr>'
     }

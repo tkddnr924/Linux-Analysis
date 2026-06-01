@@ -214,7 +214,7 @@ ipcMain.handle('db:close', () => {
 })
 
 // 사이드바에 노출하지 않는 내부 캐시/메타 테이블
-const _HIDDEN_TABLES = new Set(['dashboard', 'ip_summary'])
+const _HIDDEN_TABLES = new Set(['dashboard', 'ip_summary', 'ipinfo'])
 
 // ── IPC: 테이블 목록 + 행 수 ─────────────────────────
 ipcMain.handle('db:getTables', () => {
@@ -689,6 +689,32 @@ ipcMain.handle('db:getGenericDashboard', (_e, table) => {
 
     return { table, tsCol, range, breakdowns, scanLimited: !allowScan }
   } catch { return null }
+})
+
+// ── IPC: IP enrich 캐시 일괄 로드 (DB 열 때 1회) ─────
+// ipinfo 테이블 전체를 {ip: {country_code, country, asn, as_name, vpn_suspect}} 맵으로.
+ipcMain.handle('db:getIpInfo', () => {
+  if (!db) return {}
+  try {
+    const exists = db.prepare(
+      "SELECT name FROM sqlite_master WHERE type='table' AND name='ipinfo'"
+    ).get()
+    if (!exists) return {}
+    const rows = db.prepare(
+      "SELECT ip, country_code, country, asn, as_name, vpn_suspect FROM ipinfo"
+    ).all()
+    const map = {}
+    for (const r of rows) {
+      map[r.ip] = {
+        cc:  r.country_code || '',
+        cn:  r.country      || '',
+        asn: r.asn          || '',
+        co:  r.as_name      || '',
+        vpn: !!r.vpn_suspect,
+      }
+    }
+    return map
+  } catch { return {} }
 })
 
 // ── IPC: 전체 테이블 통합 검색 ───────────────────────

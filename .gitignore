@@ -14,3 +14,6 @@ build/
 
 # Electron 빌드 결과물
 gui/dist/
+
+# IPinfo Lite API 토큰 (절대 커밋 금지)
+.ipinfo_token
