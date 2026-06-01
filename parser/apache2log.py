@@ -76,12 +76,26 @@ def _vhost_from_path(file_path: Path) -> tuple[str, bool]:
     """
     파일명에서 (default_vhost, vhost_in_line) 반환.
     vhost_in_line=True → other_vhosts_access.log 형식 (라인 파싱으로 추출)
+
+    지원 파일명 예:
+      access.log                                → default
+      access.log.1, access.log.gz               → default (rotation)
+      site-access.log                           → site
+      site_access_log                           → site
+      bzpp.co.kr_access_log.2026-03-15.txt      → bzpp.co.kr (.txt + 날짜 suffix)
+      cclab.bzpp.co.kr_access_log.2026-04-01    → cclab.bzpp.co.kr
+      other_vhosts_access.log                   → (vhost_in_line=True)
     """
     name = file_path.name
     if name.endswith(".gz"):
         name = name[:-3]
-    name = re.sub(r"\.\d+$", "", name)
-    # 언더스코어 변형 정규화: access_log → access.log 형태로 간주
+    # 끝의 .txt 같은 텍스트 확장자는 제거
+    if name.endswith(".txt"):
+        name = name[:-4]
+    # 끝의 날짜(.YYYY-MM-DD) 또는 회전 번호(.N) 제거
+    name = re.sub(r"\.(\d{4}-\d{2}-\d{2}|\d+)$", "", name)
+
+    # 언더스코어 변형 정규화: _access_log → -access.log
     name_norm = name.replace("_access_log", "-access.log").replace("_access.log", "-access.log")
 
     if name in ("other_vhosts_access.log",):
@@ -89,7 +103,8 @@ def _vhost_from_path(file_path: Path) -> tuple[str, bool]:
 
     m = re.match(r"^(.+)-access\.log$", name_norm)
     if m:
-        return (m.group(1), False)
+        vhost = m.group(1)
+        return (vhost or "default", False)
 
     if name in ("access.log", "access_log"):
         return ("default", False)
@@ -134,6 +149,21 @@ _UNQUOTED_TOK_RE = re.compile(r'\S+')
 _UNESC_RE = re.compile(r'\\(.)')
 def _unesc(s: str) -> str:
     return _UNESC_RE.sub(r'\1', s) if s else s
+
+
+def _clean_ip(s: str) -> str:
+    """
+    %h 위치에 'IP, IP, IP' 같은 X-Forwarded-For 체인이 로깅되는 환경(예: ALB·
+    mod_remoteip 뒤의 Apache) 대응 — 트레일링 콤마/세미콜론을 제거하고
+    체인이면 첫 IP(=실제 클라이언트) 만 반환.
+    """
+    if not s:
+        return s
+    s = s.strip()
+    # 콤마 또는 세미콜론으로 시작하는 체인이면 앞 토큰만
+    if "," in s or ";" in s:
+        s = re.split(r"[,;]", s, 1)[0].strip()
+    return s.rstrip(",;").strip()
 
 
 def _trailing_fields(rest: str) -> list[str]:
@@ -193,7 +223,7 @@ class Apache2LogEntry:
                 self._fill(m)
 
     def _fill(self, m: re.Match):
-        self.src_ip     = m.group("src_ip")
+        self.src_ip     = _clean_ip(m.group("src_ip"))
         self.date_time  = _parse_datetime(m.group("datetime"))
         self.status     = int(m.group("status"))
         raw_bytes       = m.group("bytes")
@@ -330,7 +360,7 @@ class Apache2ErrorEntry:
             self.level     = m.group("level").lower()
             self.pid       = int(m.group("pid") or 0)
             client         = m.group("client") or ""
-            self.client_ip = client.rsplit(":", 1)[0] if ":" in client else client
+            self.client_ip = _clean_ip(client.rsplit(":", 1)[0] if ":" in client else client)
             self.message   = m.group("message")
             return
 
@@ -341,7 +371,7 @@ class Apache2ErrorEntry:
             self.level     = m.group("level").lower()
             self.module    = "core"
             client         = m.group("client") or ""
-            self.client_ip = client.rsplit(":", 1)[0] if ":" in client else client
+            self.client_ip = _clean_ip(client.rsplit(":", 1)[0] if ":" in client else client)
             self.message   = m.group("message")
 
 

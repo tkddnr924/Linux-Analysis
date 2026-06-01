@@ -88,6 +88,16 @@ def _unesc(s: str) -> str:
     return _UNESC_RE.sub(r'\1', s) if s else s
 
 
+def _clean_ip(s: str) -> str:
+    """ALB/프록시 뒤 환경에서 %h 자리에 'IP, IP, IP' 체인이 들어오는 경우 첫 IP 만."""
+    if not s:
+        return s
+    s = s.strip()
+    if "," in s or ";" in s:
+        s = re.split(r"[,;]", s, 1)[0].strip()
+    return s.rstrip(",;").strip()
+
+
 def _trailing_fields(rest: str) -> list[str]:
     """bytes 이후 referer / ua / xff 후보 — apache2log._trailing_fields 와 동일 정책.
        따옴표 있으면 그대로, 없으면 unquoted body 전체를 UA 로 보존
@@ -130,7 +140,7 @@ class NginxLogEntry:
         if not m:
             return
 
-        self.src_ip     = m.group("src_ip")
+        self.src_ip     = _clean_ip(m.group("src_ip"))
         self.date_time  = _parse_access_dt(m.group("datetime"))
         self.status     = int(m.group("status"))
         raw_bytes       = m.group("bytes")
