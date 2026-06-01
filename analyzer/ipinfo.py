@@ -24,11 +24,13 @@ API:  https://ipinfo.io/developers
 
 from __future__ import annotations
 
+import configparser
 import ipaddress
 import json
 import os
 import re
 import sqlite3
+import sys
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
@@ -39,8 +41,10 @@ from pathlib import Path
 TABLE        = "ipinfo"
 HTTP_TIMEOUT = 8                  # 초
 MAX_WORKERS  = 8                  # 동시 요청 수
-TOKEN_FILE   = Path(".ipinfo_token")
 SINGLE_URL   = "https://ipinfo.io/{ip}/json"
+
+TOKEN_FILE_NAME = ".ipinfo_token"
+CONFIG_FILE_NAME = "config.ini"
 
 # 무의미한 placeholder
 _BAD_IPS = ("", "-", "?", "0.0.0.0")
@@ -86,18 +90,65 @@ def ensure_db(conn: sqlite3.Connection):
 
 # ── 토큰 로드 (선택) ────────────────────────────────────
 
+def _candidate_dirs() -> list[Path]:
+    """`config.ini` / `.ipinfo_token` 을 찾을 후보 디렉토리 (우선순위 순, 중복 제거)."""
+    dirs: list[Path] = []
+    # 1) PyInstaller --onefile 의 .exe 가 놓인 폴더
+    if getattr(sys, "frozen", False):
+        dirs.append(Path(sys.executable).resolve().parent)
+    # 2) 현재 작업 디렉토리
+    dirs.append(Path.cwd().resolve())
+    # 3) dev 모드 — 모듈에서 본 프로젝트 루트 (analyzer/ipinfo.py → ..)
+    if not getattr(sys, "frozen", False):
+        try:
+            dirs.append(Path(__file__).resolve().parent.parent)
+        except Exception:
+            pass
+    # 순서 유지하며 중복 제거
+    seen: set[Path] = set()
+    out: list[Path] = []
+    for d in dirs:
+        if d not in seen:
+            seen.add(d); out.append(d)
+    return out
+
+
 def _load_token() -> str | None:
-    """env > 파일. 둘 다 없으면 None — 호출 자체는 정상 진행 (무토큰 한도 적용)."""
+    """
+    토큰 검색 — 우선순위:
+      1) 환경변수 IPINFO_TOKEN
+      2) 후보 디렉토리 중 `.ipinfo_token` 파일
+      3) 후보 디렉토리 중 `config.ini` 의 [ipinfo] token
+    모두 없으면 None (무토큰 호출).
+    """
     tok = os.environ.get("IPINFO_TOKEN", "").strip()
     if tok:
         return tok
-    if TOKEN_FILE.exists():
-        try:
-            t = TOKEN_FILE.read_text(encoding="utf-8").strip()
-            if t:
-                return t
-        except Exception:
-            return None
+
+    # 2) .ipinfo_token 파일
+    for d in _candidate_dirs():
+        p = d / TOKEN_FILE_NAME
+        if p.exists():
+            try:
+                t = p.read_text(encoding="utf-8").strip()
+                if t:
+                    return t
+            except Exception:
+                pass
+
+    # 3) config.ini [ipinfo] token
+    cp = configparser.ConfigParser()
+    for d in _candidate_dirs():
+        p = d / CONFIG_FILE_NAME
+        if p.exists():
+            try:
+                cp.read(p, encoding="utf-8")
+                t = cp.get("ipinfo", "token", fallback="").strip()
+                if t:
+                    return t
+            except (configparser.Error, OSError):
+                pass
+
     return None
 
 
@@ -235,7 +286,7 @@ def run(conn: sqlite3.Connection):
     if not token:
         print("  [INFO] 토큰 없이 진행 (무토큰 한도 ~1000/day).")
         print("         더 큰 한도가 필요하면 https://ipinfo.io/signup 무료 가입 후")
-        print("         환경변수 IPINFO_TOKEN 또는 .ipinfo_token 에 토큰 저장.")
+        print("         config.ini 의 [ipinfo] token 또는 환경변수 IPINFO_TOKEN 에 저장.")
 
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     rows: list[tuple] = []

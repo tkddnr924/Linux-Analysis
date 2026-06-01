@@ -33,11 +33,18 @@ jobs:
       - name: Build with PyInstaller
         run: pyinstaller linux-analyzer.spec
 
+      # config.ini 템플릿(빈 토큰)을 exe 옆에 함께 배포 → 사용자가 풀고 토큰만 채우면 됨
+      - name: Ship config.ini next to exe
+        shell: bash
+        run: cp config.ini dist/config.ini
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: linux-analyzer.exe
-          path: dist/linux-analyzer.exe
+          name: linux-analyzer
+          path: |
+            dist/linux-analyzer.exe
+            dist/config.ini
 
   # ── Electron GUI → .exe 설치파일 ─────────────────────
   build-electron:
