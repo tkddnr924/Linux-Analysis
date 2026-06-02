@@ -226,6 +226,10 @@ async function init() {
   $('ipv-btn-prev').addEventListener('click', () => goIpvPage(-1))
   $('ipv-btn-next').addEventListener('click', () => goIpvPage(1))
   $('ipv-reset-filters').addEventListener('click', resetIpvFilters)
+  $('ipv-enrich-btn').addEventListener('click', startEnrich)
+  $('ipv-enrich-cancel').addEventListener('click', () => window.api.cancelEnrich())
+  // 진행률 이벤트 구독 (창 닫힐 때까지 살아있음)
+  window.api.onEnrichProgress(onEnrichProgress)
 
   $('modal-close').addEventListener('click', closeModal)
   $('modal-overlay').addEventListener('click', closeModal)
@@ -359,12 +363,20 @@ async function setupDateFilter(tableName) {
 async function loadTable() {
   if (!S.currentTable) return
   await withTableLoading(async () => {
-    const { rows, total, columns, error } = await window.api.getTableData({
+    // 필터 시그니처 — 검색/필터/날짜 변동 없으면 COUNT 스킵 (페이지·정렬만 변경)
+    const sig = JSON.stringify([S.currentTable, S.search, S.dateFrom, S.dateTo, S.colFilters])
+    const skipCount = (sig === S._lastSig)
+
+    const { rows, total: rawTotal, columns, error } = await window.api.getTableData({
       table: S.currentTable, search: S.search, limit: PAGE_SIZE,
       offset: S.page * PAGE_SIZE, sortCol: S.sortCol, sortDir: S.sortDir,
       dateFrom: S.dateFrom, dateTo: S.dateTo, colFilters: S.colFilters,
+      skipCount,
     })
     if (error) { setStatus(`오류: ${error}`, true); return }
+    // skipCount 이면 rawTotal=null — 직전 totalRows 재사용
+    const total = (rawTotal === null || rawTotal === undefined) ? (S.totalRows || 0) : rawTotal
+    S._lastSig = sig
     S.totalRows = total; S.columns = columns
 
     if (!rows.length && !S.search && !S.dateFrom && !S.dateTo) {
@@ -539,13 +551,19 @@ async function loadAuthlogDashboard() {
 
 async function loadArtifactTable() {
   await withArtifactLoading(async () => {
-    const { rows, total, columns, error } = await window.api.getTableData({
+    const sig = JSON.stringify([A.currentTable, A.search, A.typeFilters, A.colFilters, A.statusFilter, A.methodFilters])
+    const skipCount = (sig === A._lastSig)
+
+    const { rows, total: rawTotal, columns, error } = await window.api.getTableData({
       table: A.currentTable, search: A.search, limit: PAGE_SIZE,
       offset: A.page * PAGE_SIZE, sortCol: A.sortCol, sortDir: A.sortDir,
       typeFilters: A.typeFilters, colFilters: A.colFilters,
       statusFilter: A.statusFilter, methodFilters: A.methodFilters,
+      skipCount,
     })
     if (error) { setStatus(`오류: ${error}`, true); return }
+    const total = (rawTotal === null || rawTotal === undefined) ? (A.totalRows || 0) : rawTotal
+    A._lastSig = sig
     A.totalRows = total; A.columns = columns
     $('artifact-badge').textContent = `${total.toLocaleString()}건`
     renderTableData('artifact-data-table', columns, rows, loadArtifactTable)
@@ -624,6 +642,7 @@ async function selectIpView() {
   I.ips = (await window.api.getWebIps()) || []
   computeGroups()
   renderIpList()
+  refreshEnrichButtonLabel()
 }
 
 // 모드 (전체/C/B) 에 따라 표시용 그룹 산출 ─ groups: [{key, count, sample, mode, value}]
@@ -661,23 +680,33 @@ function setActiveModeBtn(mode) {
     b.classList.toggle('active', b.dataset.mode === mode))
 }
 
+// 한 번에 렌더할 최대 행 — 25만 행이면 DOM 이 무거워져서 잘림
+const IPV_RENDER_LIMIT = 1000
+
 function renderIpList() {
   const el = $('ipv-list')
   const q = I.listFilter.trim().toLowerCase()
   const filtered = q ? I.groups.filter(g => g.key.toLowerCase().includes(q)) : I.groups
-  $('ipv-stats').textContent =
-    I.mode === 'all'
-      ? `${filtered.length.toLocaleString()} / ${I.groups.length.toLocaleString()} IP`
-      : `${filtered.length.toLocaleString()} 네트워크 (총 ${I.ips.length.toLocaleString()} IP)`
+  const visible  = filtered.slice(0, IPV_RENDER_LIMIT)
+  const truncated = filtered.length - visible.length
 
-  if (!filtered.length) {
+  $('ipv-stats').textContent = (() => {
+    if (I.mode === 'all') {
+      const showing = q ? `${filtered.length.toLocaleString()} 일치` : `${I.groups.length.toLocaleString()} IP`
+      const renderedNote = truncated > 0 ? ` · 상위 ${IPV_RENDER_LIMIT.toLocaleString()} 표시` : ''
+      return `${showing}${renderedNote}`
+    }
+    const renderedNote = truncated > 0 ? ` · 상위 ${IPV_RENDER_LIMIT.toLocaleString()} 표시` : ''
+    return `${filtered.length.toLocaleString()} 네트워크 (총 ${I.ips.length.toLocaleString()} IP)${renderedNote}`
+  })()
+
+  if (!visible.length) {
     el.innerHTML = '<div class="ipv-empty" style="padding:24px">목록이 비어있습니다.</div>'
     return
   }
 
-  el.innerHTML = filtered.map((g, idx) => {
+  let html = visible.map((g, idx) => {
     const isActive = I.selected && I.selected.value === g.selector.value && I.selected.mode === g.selector.mode
-    // 'all' 모드에서만 국기 표시 (IP 단위 enrich)
     const flagHtml = (I.mode === 'all' && IP_INFO[g.key])
       ? `<span class="ip-flag" title="${esc(IP_INFO[g.key].cn || IP_INFO[g.key].cc)}">${flagOf(IP_INFO[g.key].cc)}</span>`
       : ''
@@ -689,9 +718,13 @@ function renderIpList() {
     </div>`
   }).join('')
 
-  // 클릭 → 선택
+  if (truncated > 0) {
+    html += `<div class="ipv-truncated">+${truncated.toLocaleString()}개 더 있음 — 위 검색창에 IP/네트워크 입력으로 필터</div>`
+  }
+  el.innerHTML = html
+
   el.querySelectorAll('.ipv-row').forEach(row => row.addEventListener('click', () => {
-    const g = filtered[parseInt(row.dataset.idx, 10)]
+    const g = visible[parseInt(row.dataset.idx, 10)]
     selectIpEntry(g)
   }))
 }
@@ -709,13 +742,19 @@ function selectIpEntry(group) {
 async function loadIpRecords() {
   if (!I.selected) return
   await withIpvLoading(async () => {
-    const { rows, total, columns, error } = await window.api.getWebRecords({
+    const sig = JSON.stringify([I.selected, I.search, I.colFilters])
+    const skipCount = (sig === I._lastSig)
+
+    const { rows, total: rawTotal, columns, error } = await window.api.getWebRecords({
       selector: I.selected,
       limit: PAGE_SIZE, offset: I.page * PAGE_SIZE,
       sortCol: I.sortCol, sortDir: I.sortDir,
       search: I.search, colFilters: I.colFilters,
+      skipCount,
     })
     if (error) { setStatus(`오류: ${error}`, true); return }
+    const total = (rawTotal === null || rawTotal === undefined) ? (I.totalRows || 0) : rawTotal
+    I._lastSig = sig
     I.totalRows = total; I.columns = columns
     $('ipv-badge').textContent = `${total.toLocaleString()}건`
     renderTableData('ipv-records', columns, rows, loadIpRecords)
@@ -759,6 +798,57 @@ function switchIpvMode(mode) {
   show('ipv-empty', true)
   computeGroups()
   renderIpList()
+}
+
+// ── IP enrich 트리거 + 진행률 ────────────────────────
+async function refreshEnrichButtonLabel() {
+  try {
+    const s = await window.api.enrichStatus()
+    if (!s?.available) return
+    const remaining = Math.max(0, (s.total || 0) - (s.cached || 0))
+    const lbl = remaining > 0
+      ? `IP 정보 채우기 (${(s.cached||0).toLocaleString()} / ${(s.total||0).toLocaleString()})`
+      : `IP 정보 모두 채워짐 (${(s.cached||0).toLocaleString()})`
+    $('ipv-enrich-btn').textContent = lbl
+    $('ipv-enrich-btn').disabled = !!s.running || remaining === 0
+    $('ipv-enrich-btn').title = s.hasToken
+      ? 'IPinfo 토큰 인식됨 — 한도 50K/month'
+      : '토큰 없음 — 무토큰 한도 ~1000/day. 더 큰 한도가 필요하면 config.ini 에 token 입력.'
+  } catch { /* 무시 */ }
+}
+
+async function startEnrich() {
+  $('ipv-enrich-btn').disabled = true
+  show('ipv-enrich-progress', true)
+  $('ipv-progress-fill').style.width = '0%'
+  $('ipv-progress-label').textContent = '준비 중...'
+  const r = await window.api.startEnrichIps()
+  if (!r?.ok) {
+    setStatus(`enrich 실패: ${r?.error || '알 수 없음'}`, true)
+    show('ipv-enrich-progress', false)
+    refreshEnrichButtonLabel()
+  }
+  // 완료 처리는 onEnrichProgress 의 finished:true 에서
+}
+
+function onEnrichProgress({ done, total, ok, fail, finished, cancelled }) {
+  const pct = total > 0 ? Math.round((done / total) * 100) : 0
+  $('ipv-progress-fill').style.width = pct + '%'
+  const tail = fail > 0 ? `  · 실패 ${fail.toLocaleString()}` : ''
+  $('ipv-progress-label').textContent =
+    finished
+      ? (cancelled ? `취소됨 — ${ok.toLocaleString()} 추가${tail}` : `완료 — ${ok.toLocaleString()} 추가${tail}`)
+      : `${done.toLocaleString()} / ${total.toLocaleString()}${tail}`
+
+  if (finished) {
+    setTimeout(async () => {
+      show('ipv-enrich-progress', false)
+      // IP_INFO 캐시 재로드 → 리스트 즉시 새로 렌더(국기/회사 반영)
+      IP_INFO = (await window.api.getIpInfo()) || {}
+      renderIpList()
+      refreshEnrichButtonLabel()
+    }, 800)
+  }
 }
 
 // ── Syslog 대시보드 ───────────────────────────────────

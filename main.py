@@ -45,7 +45,6 @@ import parser.kernlog      as kernlog
 import parser.mysqllog     as mysqlmod
 import analyzer.sysinfo   as sysinfo_analyzer
 import analyzer.dashboard as dashboard_analyzer
-import analyzer.ipinfo    as ipinfo_analyzer
 from parser.utils.files import md5 as file_md5, is_compressed, decompress
 
 # ── 설정 ──────────────────────────────────────────────
@@ -295,9 +294,7 @@ def parse_logs():
         except Exception:
             pass
 
-        # 웹 로그 IP enrich (IPinfo Lite — 토큰 있을 때만 동작)
-        print("\n[IPINFO] 웹 로그 IP enrich 중...")
-        ipinfo_analyzer.run(conn)
+        # IP enrich(IPinfo) 는 뷰어에서 'IP 정보 채우기' 버튼으로 진행 → 파서는 빠르게 끝.
     finally:
         conn.close()
         cleanup_decomp()

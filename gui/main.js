@@ -12,6 +12,242 @@ let currentDbPath = null
 // gui/ 의 부모(프로젝트 루트)에 있는 parser.db 자동 감지
 const AUTO_DB = path.join(__dirname, '..', 'parser.db')
 
+// ── IPinfo enrich (viewer 측) ─────────────────────────
+// 토큰 로드: env > .ipinfo_token > config.ini ([ipinfo] token)
+function _loadIpinfoToken () {
+  const envTok = (process.env.IPINFO_TOKEN || '').trim()
+  if (envTok) return envTok
+  const dirs = [
+    process.cwd(),
+    path.resolve(__dirname, '..'),
+    path.dirname(process.execPath),       // 패키징된 .exe 위치
+  ]
+  for (const d of dirs) {
+    const tokPath = path.join(d, '.ipinfo_token')
+    try {
+      if (fs.existsSync(tokPath)) {
+        const t = fs.readFileSync(tokPath, 'utf8').trim()
+        if (t) return t
+      }
+    } catch {}
+    const cfgPath = path.join(d, 'config.ini')
+    try {
+      if (fs.existsSync(cfgPath)) {
+        const txt = fs.readFileSync(cfgPath, 'utf8')
+        // 간단한 INI — [ipinfo] 섹션 안의 token = X 줄 탐색
+        let inSection = false
+        for (const raw of txt.split(/\r?\n/)) {
+          const line = raw.trim()
+          if (!line || line.startsWith('#') || line.startsWith(';')) continue
+          if (/^\[.*\]$/.test(line)) { inSection = /^\[ipinfo\]$/i.test(line); continue }
+          if (!inSection) continue
+          const m = line.match(/^token\s*=\s*(.+)$/i)
+          if (m) {
+            const v = m[1].trim()
+            if (v) return v
+          }
+        }
+      }
+    } catch {}
+  }
+  return null
+}
+
+// 사설/예약 IPv4 빠른 필터. IPv6 는 단순화: ::1 만 제외하고 나머지는 일단 허용.
+function _isPublicIp (ip) {
+  if (!ip) return false
+  ip = String(ip).trim()
+  if (!ip || ip === '0.0.0.0' || ip === '::' || ip === '::1') return false
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(ip)
+  if (!m) return ip.includes(':')   // IPv6 형태면 통과 (단순화)
+  const [a, b] = m.slice(1, 5).map(Number)
+  if (a === 10) return false                          // 10/8
+  if (a === 127) return false                         // loopback
+  if (a === 169 && b === 254) return false            // link-local
+  if (a === 172 && b >= 16 && b <= 31) return false   // 172.16/12
+  if (a === 192 && b === 168) return false            // 192.168/16
+  if (a === 198 && (b === 18 || b === 19)) return false  // 벤치마크
+  if (a === 192 && b === 0) return false              // doc + TEST-NET-1
+  if (a === 198 && b === 51 && /^198\.51\.100\./.test(ip)) return false  // TEST-NET-2
+  if (a === 203 && b === 0 && /^203\.0\.113\./.test(ip))  return false  // TEST-NET-3
+  if (a >= 224) return false                          // multicast / 예약
+  return true
+}
+
+const _VPN_HINT_TOKENS = [
+  'vpn','nordvpn','expressvpn','protonvpn','surfshark','mullvad','cyberghost',
+  'tunnelbear','ivpn','windscribe','vyprvpn','private internet access',
+  'hide.me','hidemyass','tor exit','tor relay','anonymous',
+  'digitalocean','vultr','linode','ovh','hetzner','choopa','m247','datacamp',
+  'leaseweb','contabo','ramnode','amazon technologies','amazon-02',
+  'amazon data services','google cloud','microsoft corporation','microsoft-corp',
+  'azure','alibaba','tencent cloud','oracle corporation',
+]
+function _isVpnSuspect (asName) {
+  if (!asName) return 0
+  const s = asName.toLowerCase()
+  return _VPN_HINT_TOKENS.some(t => s.includes(t)) ? 1 : 0
+}
+
+// "AS15169 Google LLC" → {asn: 'AS15169', as_name: 'Google LLC'}
+function _parseOrg (org) {
+  if (!org) return { asn: '', as_name: '' }
+  const m = String(org).trim().match(/^(AS\d+)\s+(.+)$/)
+  if (m) return { asn: m[1], as_name: m[2] }
+  return { asn: '', as_name: String(org).trim() }
+}
+
+// 단일 IP 조회 — 실패하면 null
+async function _fetchIpInfo (ip, token, timeoutMs = 8000) {
+  let url = `https://ipinfo.io/${encodeURIComponent(ip)}/json`
+  if (token) url += `?token=${encodeURIComponent(token)}`
+  try {
+    const res = await fetch(url, {
+      method: 'GET',
+      headers: { Accept: 'application/json' },
+      signal: AbortSignal.timeout(timeoutMs),
+    })
+    if (!res.ok) return null
+    const data = await res.json()
+    if (!data || !data.ip) return null
+    return data
+  } catch {
+    return null
+  }
+}
+
+// 진행 중인 enrich job (취소·중복 방지)
+let _enrichJob = null
+
+ipcMain.handle('db:enrichStatus', () => {
+  if (!db || !currentDbPath) return { available: false, reason: 'no-db' }
+  // ipinfo 테이블이 없으면 처음 실행 — available
+  let cached = 0, total = 0
+  try {
+    const exists = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='ipinfo'").get()
+    if (exists) cached = db.prepare('SELECT COUNT(*) c FROM ipinfo').get().c
+  } catch {}
+  for (const s of _WEB_LOG_SRC) {
+    try {
+      const ex = db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(s.table)
+      if (!ex) continue
+      total += db.prepare(`SELECT COUNT(DISTINCT "${s.ip}") c FROM "${s.table}"
+                           WHERE "${s.ip}" IS NOT NULL AND "${s.ip}" NOT IN ('','-','?','0.0.0.0')`).get().c
+    } catch {}
+  }
+  return {
+    available: !!currentDbPath,
+    cached, total,
+    hasToken: !!_loadIpinfoToken(),
+    running: !!_enrichJob,
+  }
+})
+
+ipcMain.handle('db:cancelEnrich', () => {
+  if (_enrichJob) _enrichJob.cancel = true
+  return { ok: true }
+})
+
+ipcMain.handle('db:startEnrichIps', async (event, opts = {}) => {
+  if (!db || !currentDbPath) return { ok: false, error: 'no DB' }
+  if (_enrichJob) return { ok: false, error: '이미 실행 중' }
+
+  const token = _loadIpinfoToken()
+  // 1) 일시 RW 연결 (메인 read-only 와 분리)
+  const rw = new Database(currentDbPath)
+  try {
+    rw.exec("PRAGMA journal_mode=WAL")
+    rw.exec("PRAGMA synchronous=NORMAL")
+    rw.exec(`CREATE TABLE IF NOT EXISTS ipinfo (
+      ip TEXT PRIMARY KEY,
+      country_code TEXT, country TEXT,
+      continent_code TEXT, continent TEXT,
+      asn TEXT, as_name TEXT, as_domain TEXT,
+      vpn_suspect INTEGER NOT NULL DEFAULT 0,
+      fetched_at TEXT NOT NULL
+    )`)
+    rw.exec(`CREATE INDEX IF NOT EXISTS idx_ipinfo_country ON ipinfo(country_code)`)
+    rw.exec(`CREATE INDEX IF NOT EXISTS idx_ipinfo_vpn     ON ipinfo(vpn_suspect)`)
+
+    // 2) 대상 IP 수집 — 웹 로그 4개에서 UNION 후 캐시되지 않은 + 공인 IP만
+    const cached = new Set(rw.prepare('SELECT ip FROM ipinfo').all().map(r => r.ip))
+    const all = new Set()
+    for (const s of _WEB_LOG_SRC) {
+      try {
+        const ex = rw.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(s.table)
+        if (!ex) continue
+        for (const r of rw.prepare(`SELECT DISTINCT "${s.ip}" AS ip FROM "${s.table}"
+            WHERE "${s.ip}" IS NOT NULL AND "${s.ip}" NOT IN ('','-','?','0.0.0.0')`).iterate()) {
+          if (_isPublicIp(r.ip)) all.add(r.ip)
+        }
+      } catch {}
+    }
+    const todo = [...all].filter(ip => !cached.has(ip))
+
+    if (!todo.length) {
+      event.sender.send('enrich-progress', { done: 0, total: 0, ok: 0, fail: 0, finished: true })
+      return { ok: true, total: 0, ok_count: 0, fail_count: 0 }
+    }
+
+    // 3) 8 동시 fetch + 50개씩 묶어서 INSERT
+    _enrichJob = { cancel: false }
+    const concurrency = 8
+    let idx = 0, done = 0, okN = 0, failN = 0
+    const buffer = []
+    const flush = () => {
+      if (!buffer.length) return
+      const ins = rw.prepare(`INSERT OR REPLACE INTO ipinfo
+        (ip, country_code, country, continent_code, continent,
+         asn, as_name, as_domain, vpn_suspect, fetched_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?)`)
+      const now = new Date().toISOString().slice(0, 19).replace('T', ' ')
+      const tx = rw.transaction((rows) => { for (const r of rows) ins.run(...r, now) })
+      tx(buffer)
+      buffer.length = 0
+    }
+
+    async function worker () {
+      while (!_enrichJob.cancel) {
+        const my = idx++
+        if (my >= todo.length) break
+        const ip = todo[my]
+        const data = await _fetchIpInfo(ip, token)
+        if (data) {
+          const { asn, as_name } = _parseOrg(data.org)
+          buffer.push([
+            ip,
+            data.country || '', '', '', '',
+            asn, as_name, '', _isVpnSuspect(as_name),
+          ])
+          okN++
+        } else {
+          failN++
+        }
+        done++
+        if (buffer.length >= 50) flush()
+        if (done % 20 === 0 || done === todo.length) {
+          event.sender.send('enrich-progress', {
+            done, total: todo.length, ok: okN, fail: failN, finished: false
+          })
+        }
+      }
+    }
+    await Promise.all(Array.from({ length: concurrency }, worker))
+    flush()
+
+    const cancelled = !!_enrichJob.cancel
+    event.sender.send('enrich-progress', {
+      done, total: todo.length, ok: okN, fail: failN, finished: true, cancelled
+    })
+    return { ok: true, total: todo.length, ok_count: okN, fail_count: failN, cancelled }
+  } catch (e) {
+    return { ok: false, error: e.message }
+  } finally {
+    try { rw.close() } catch {}
+    _enrichJob = null
+  }
+})
+
 // ── 검색/필터 접두어 문법 ────────────────────────────
 //   foo                 → 포함  (LIKE %foo%)
 //   !foo                → 제외  (NOT LIKE %foo%)
@@ -217,13 +453,32 @@ ipcMain.handle('db:close', () => {
 const _HIDDEN_TABLES = new Set(['dashboard', 'ip_summary', 'ipinfo'])
 
 // ── IPC: 테이블 목록 + 행 수 ─────────────────────────
+// 큰 테이블(예: apache2 26M 행) 의 COUNT(*) 는 사이드바 렌더를 지연시키므로,
+// 사전계산된 dashboard 캐시의 overview.total 을 우선 사용.
 ipcMain.handle('db:getTables', () => {
   if (!db) return []
   try {
     const rows = db.prepare(
       "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
     ).all().filter(r => !_HIDDEN_TABLES.has(r.name))
+
+    // dashboard 캐시 일괄 로드 (테이블당 SELECT 한 번 피하기 위해)
+    const cachedTotals = new Map()
+    try {
+      const dashRows = db.prepare("SELECT table_name, payload FROM dashboard").all()
+      for (const r of dashRows) {
+        try {
+          const p = JSON.parse(r.payload)
+          const t = p?.overview?.total
+          if (Number.isFinite(t)) cachedTotals.set(r.table_name, t)
+        } catch { /* skip */ }
+      }
+    } catch { /* dashboard 테이블 없음 */ }
+
     return rows.map(r => {
+      // 1) 사전계산된 dashboard total
+      if (cachedTotals.has(r.name)) return { name: r.name, count: cachedTotals.get(r.name) }
+      // 2) 폴백: live COUNT (작은 테이블만 해당)
       try {
         const { c } = db.prepare(`SELECT COUNT(*) as c FROM "${r.name}"`).get()
         return { name: r.name, count: c }
@@ -237,7 +492,9 @@ ipcMain.handle('db:getTables', () => {
 })
 
 // ── IPC: 테이블 데이터 (페이지네이션 + 검색 + 정렬 + 날짜 범위 + 컬럼 필터 + 타입/상태/메서드 필터) ─
-ipcMain.handle('db:getTableData', (_e, { table, search, limit, offset, sortCol, sortDir, dateFrom, dateTo, colFilters, typeFilters, statusFilter, methodFilters }) => {
+// skipCount: true 이면 COUNT(*) 스킵하고 total 은 null. 페이지 이동·정렬만 변경됐을 때
+// 호출측이 이전 total 을 재사용하면 큰 테이블에서 페이지 넘기는 비용을 크게 줄임.
+ipcMain.handle('db:getTableData', (_e, { table, search, limit, offset, sortCol, sortDir, dateFrom, dateTo, colFilters, typeFilters, statusFilter, methodFilters, skipCount }) => {
   if (!db) return { rows: [], total: 0, columns: [] }
   try {
     const cols = db.prepare(`PRAGMA table_info("${table}")`).all().map(r => r.name)
@@ -305,7 +562,9 @@ ipcMain.handle('db:getTableData', (_e, { table, search, limit, offset, sortCol, 
       order = `ORDER BY "${tsCol}" ASC`
     }
 
-    const total = db.prepare(`SELECT COUNT(*) as c FROM "${table}" ${where}`).get(...params).c
+    const total = skipCount
+      ? null
+      : db.prepare(`SELECT COUNT(*) as c FROM "${table}" ${where}`).get(...params).c
     const rows  = db.prepare(`SELECT * FROM "${table}" ${where} ${order} LIMIT ? OFFSET ?`).all(...params, limit, offset)
 
     return { rows, total, columns: cols }
@@ -727,7 +986,7 @@ ipcMain.handle('db:getWebIps', () => {
 // ── IPC: 선택된 IP/CIDR 의 웹 로그 records UNION (페이지네이션 + 정렬 + 컬럼 필터) ─
 //   selector: { mode: 'exact'|'prefix', value: '1.2.3.4' | '1.2.3.' | '1.2.' }
 // 모든 테이블의 공통 컬럼만 UNION (각 테이블의 고유 컬럼은 NULL 로 채움).
-ipcMain.handle('db:getWebRecords', (_e, { selector, limit, offset, sortCol, sortDir, search, colFilters }) => {
+ipcMain.handle('db:getWebRecords', (_e, { selector, limit, offset, sortCol, sortDir, search, colFilters, skipCount }) => {
   const empty = { rows: [], total: 0, columns: [] }
   if (!db || !selector?.value) return empty
 
@@ -789,10 +1048,12 @@ ipcMain.handle('db:getWebRecords', (_e, { selector, limit, offset, sortCol, sort
   }
 
   try {
-    const totalRow = db.prepare(`SELECT COUNT(*) AS c FROM (${union}) ${where}`).get(...subparams, ...condParams)
-    const rows    = db.prepare(`SELECT * FROM (${union}) ${where} ${order} LIMIT ? OFFSET ?`)
+    const total = skipCount
+      ? null
+      : db.prepare(`SELECT COUNT(*) AS c FROM (${union}) ${where}`).get(...subparams, ...condParams).c
+    const rows  = db.prepare(`SELECT * FROM (${union}) ${where} ${order} LIMIT ? OFFSET ?`)
                        .all(...subparams, ...condParams, limit, offset)
-    return { rows, total: totalRow.c, columns: COMMON }
+    return { rows, total, columns: COMMON }
   } catch (e) {
     return { rows: [], total: 0, columns: COMMON, error: e.message }
   }

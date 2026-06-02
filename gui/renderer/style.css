@@ -681,6 +681,40 @@ body.col-resizing * { cursor: col-resize !important; user-select: none !importan
   letter-spacing: .04em;
 }
 
+/* IP enrich 버튼 + 진행 */
+.ipv-enrich { display: flex; flex-direction: column; gap: 4px; }
+.ipv-enrich-btn {
+  width: 100%;
+  padding: 5px 10px;
+  font-size: 11.5px;
+  font-weight: 600;
+  border-color: var(--accent-muted);
+  color: var(--accent);
+}
+.ipv-enrich-btn:hover { background: var(--accent-light); border-color: var(--accent); }
+.ipv-enrich-btn:disabled { opacity: .6; cursor: not-allowed; }
+.ipv-enrich-progress { display: flex; flex-direction: column; gap: 3px; padding-top: 2px; }
+.ipv-progress-bar {
+  height: 4px;
+  background: var(--border-light);
+  border-radius: 2px;
+  overflow: hidden;
+}
+.ipv-progress-fill {
+  height: 100%;
+  width: 0;
+  background: var(--accent);
+  transition: width .2s ease;
+}
+.ipv-progress-text {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 10.5px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
 .ipv-list {
   flex: 1;
   overflow-y: auto;
@@ -724,6 +758,16 @@ body.col-resizing * { cursor: col-resize !important; user-select: none !importan
 .ipv-row.active .ipv-row-cnt {
   color: var(--accent);
   background: #fff;
+}
+.ipv-truncated {
+  padding: 10px 12px;
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--text-muted);
+  background: var(--surface);
+  border: 1px dashed var(--border);
+  border-radius: 4px;
+  text-align: center;
 }
 .ipv-row-sub {
   font-size: 10px;

@@ -58,6 +58,20 @@ contextBridge.exposeInMainWorld('api', {
   /** 선택된 IP/CIDR 의 웹 로그 records UNION — pagination + 정렬 + 컬럼 필터 */
   getWebRecords: (opts) => ipcRenderer.invoke('db:getWebRecords', opts),
 
+  // ── IP enrich (사용자 트리거) ─────────────────────
+  /** 현재 enrich 상태 → { available, cached, total, hasToken, running } */
+  enrichStatus:   () => ipcRenderer.invoke('db:enrichStatus'),
+  /** enrich 시작 — 비동기, 끝나면 결과 반환. 진행은 onEnrichProgress 로 받음 */
+  startEnrichIps: () => ipcRenderer.invoke('db:startEnrichIps'),
+  /** 현재 진행 중 enrich 취소 */
+  cancelEnrich:   () => ipcRenderer.invoke('db:cancelEnrich'),
+  /** 진행률 이벤트 구독: cb({done, total, ok, fail, finished, cancelled}) — 해제 함수 반환 */
+  onEnrichProgress: (cb) => {
+    const h = (_e, payload) => cb(payload)
+    ipcRenderer.on('enrich-progress', h)
+    return () => ipcRenderer.removeListener('enrich-progress', h)
+  },
+
   /**
    * 전체 테이블 통합 검색
    * @returns {{ table, columns, rows, total }[]}

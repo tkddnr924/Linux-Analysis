@@ -70,6 +70,20 @@
                      placeholder="IP 필터..." autocomplete="off" spellcheck="false" />
             </div>
             <div class="ipv-stats" id="ipv-stats">—</div>
+            <!-- IP enrich (IPinfo) 버튼 + 진행 표시 -->
+            <div class="ipv-enrich">
+              <button id="ipv-enrich-btn" class="btn btn-ghost ipv-enrich-btn"
+                      title="IPinfo 에서 국가·회사·VPN 정보 조회 (무토큰 ~1000/day)">
+                IP 정보 채우기
+              </button>
+              <div id="ipv-enrich-progress" class="ipv-enrich-progress hidden">
+                <div class="ipv-progress-bar"><div id="ipv-progress-fill" class="ipv-progress-fill"></div></div>
+                <div class="ipv-progress-text">
+                  <span id="ipv-progress-label">0 / 0</span>
+                  <button id="ipv-enrich-cancel" class="btn-icon" title="취소">×</button>
+                </div>
+              </div>
+            </div>
           </div>
           <div id="ipv-list" class="ipv-list"></div>
         </aside>
