@@ -139,39 +139,6 @@ function makeLoader(containerId) {
 const withTableLoading    = makeLoader('data-table')
 const withArtifactLoading = makeLoader('artifact-data-table')
 
-// ── IP enrich 캐시 (IPinfo Lite) ──────────────────────
-// DB 열 때 1회 로드. {ip: {cc, cn, asn, co, vpn}}
-let IP_INFO = {}
-
-// 셀에서 자동 enrich 하는 컬럼명
-const IP_COLUMNS = new Set(['src_ip', 'client_ip', 'addr', 'ip', 'xff'])
-
-// ISO 2자 국가코드 → 국기 emoji (Regional Indicator Symbol 두 글자 조합)
-function flagOf(cc) {
-  if (!cc || cc.length !== 2) return ''
-  const A = 0x1F1E6 - 0x41
-  const c0 = cc.toUpperCase().charCodeAt(0)
-  const c1 = cc.toUpperCase().charCodeAt(1)
-  if (c0 < 0x41 || c0 > 0x5A || c1 < 0x41 || c1 > 0x5A) return ''
-  return String.fromCodePoint(A + c0) + String.fromCodePoint(A + c1)
-}
-
-// IP 정보를 셀 HTML 로 — 국기 + 원본 IP + (선택) VPN 배지, 툴팁에 회사·국가
-function ipCellHtml(rawIp) {
-  const info = IP_INFO[rawIp]
-  if (!info) return `<td title="${esc(rawIp)}">${esc(rawIp)}</td>`
-  const flag = flagOf(info.cc)
-  const tip  = [
-    info.cn || '?',
-    info.co || '',
-    info.asn ? `(${info.asn})` : '',
-    info.vpn ? '· VPN/호스팅 의심' : '',
-  ].filter(Boolean).join(' ')
-  const vpnBadge = info.vpn ? `<span class="ip-vpn" title="VPN/Proxy/호스팅 의심 (AS 이름 휴리스틱)">VPN?</span>` : ''
-  const flagHtml = flag ? `<span class="ip-flag" title="${esc(info.cn || info.cc)}">${flag}</span>` : ''
-  return `<td title="${esc(tip)}">${flagHtml}${esc(rawIp)}${vpnBadge}</td>`
-}
-
 // 테이블에서 시간 컬럼 자동 탐지 (main.js 의 tsCol 규칙과 동일)
 function detectTsCol(columns) {
   if (columns.includes('date_time')) return 'date_time'
@@ -235,10 +202,6 @@ async function init() {
   $('ipv-btn-prev').addEventListener('click', () => goIpvPage(-1))
   $('ipv-btn-next').addEventListener('click', () => goIpvPage(1))
   $('ipv-reset-filters').addEventListener('click', resetIpvFilters)
-  $('ipv-enrich-btn').addEventListener('click', startEnrich)
-  $('ipv-enrich-cancel').addEventListener('click', () => window.api.cancelEnrich())
-  // 진행률 이벤트 구독 (창 닫힐 때까지 살아있음)
-  window.api.onEnrichProgress(onEnrichProgress)
 
   $('modal-close').addEventListener('click', closeModal)
   $('modal-overlay').addEventListener('click', closeModal)
@@ -330,7 +293,6 @@ function onPipelineLog({ stream, line }) {
 }
 
 async function loadDb(filePath) {
-  IP_INFO = {}                                         // 이전 DB 잔재 초기화
   const r = await window.api.openDB(filePath)
   if (!r.success) { setStatus(`오류: ${r.error}`, true); return }
   const name = filePath.split(/[\\/]/).pop()
@@ -338,7 +300,6 @@ async function loadDb(filePath) {
   $('db-path').title = filePath
   setStatus(`${name} 열림`)
   show('welcome', false)
-  IP_INFO = (await window.api.getIpInfo()) || {}       // IP enrich 캐시 일괄 로드
   await renderSidebar()
 }
 
@@ -717,7 +678,6 @@ async function selectIpView() {
   I.ips = (await window.api.getWebIps()) || []
   computeGroups()
   renderIpList()
-  refreshEnrichButtonLabel()
 }
 
 // 모드 (전체/C/B) 에 따라 표시용 그룹 산출 ─ groups: [{key, count, sample, mode, value}]
@@ -782,14 +742,11 @@ function renderIpList() {
 
   let html = visible.map((g, idx) => {
     const isActive = I.selected && I.selected.value === g.selector.value && I.selected.mode === g.selector.mode
-    const flagHtml = (I.mode === 'all' && IP_INFO[g.key])
-      ? `<span class="ip-flag" title="${esc(IP_INFO[g.key].cn || IP_INFO[g.key].cc)}">${flagOf(IP_INFO[g.key].cc)}</span>`
-      : ''
     const subHtml = I.mode === 'all'
-      ? (IP_INFO[g.key]?.co ? `<span class="ipv-row-sub" title="${esc(IP_INFO[g.key].co)}">${esc(IP_INFO[g.key].co)}</span>` : '')
+      ? ''
       : `<span class="ipv-row-sub">${esc(g.sample)}</span>`
     return `<div class="ipv-row${isActive ? ' active' : ''}" data-idx="${idx}">
-      ${flagHtml}<span class="ipv-row-key">${esc(g.key)}</span>${subHtml}<span class="ipv-row-cnt">${g.count.toLocaleString()}</span>
+      <span class="ipv-row-key">${esc(g.key)}</span>${subHtml}<span class="ipv-row-cnt">${g.count.toLocaleString()}</span>
     </div>`
   }).join('')
 
@@ -873,57 +830,6 @@ function switchIpvMode(mode) {
   show('ipv-empty', true)
   computeGroups()
   renderIpList()
-}
-
-// ── IP enrich 트리거 + 진행률 ────────────────────────
-async function refreshEnrichButtonLabel() {
-  try {
-    const s = await window.api.enrichStatus()
-    if (!s?.available) return
-    const remaining = Math.max(0, (s.total || 0) - (s.cached || 0))
-    const lbl = remaining > 0
-      ? `IP 정보 채우기 (${(s.cached||0).toLocaleString()} / ${(s.total||0).toLocaleString()})`
-      : `IP 정보 모두 채워짐 (${(s.cached||0).toLocaleString()})`
-    $('ipv-enrich-btn').textContent = lbl
-    $('ipv-enrich-btn').disabled = !!s.running || remaining === 0
-    $('ipv-enrich-btn').title = s.hasToken
-      ? 'IPinfo 토큰 인식됨 — 한도 50K/month'
-      : '토큰 없음 — 무토큰 한도 ~1000/day. 더 큰 한도가 필요하면 config.ini 에 token 입력.'
-  } catch { /* 무시 */ }
-}
-
-async function startEnrich() {
-  $('ipv-enrich-btn').disabled = true
-  show('ipv-enrich-progress', true)
-  $('ipv-progress-fill').style.width = '0%'
-  $('ipv-progress-label').textContent = '준비 중...'
-  const r = await window.api.startEnrichIps()
-  if (!r?.ok) {
-    setStatus(`enrich 실패: ${r?.error || '알 수 없음'}`, true)
-    show('ipv-enrich-progress', false)
-    refreshEnrichButtonLabel()
-  }
-  // 완료 처리는 onEnrichProgress 의 finished:true 에서
-}
-
-function onEnrichProgress({ done, total, ok, fail, finished, cancelled }) {
-  const pct = total > 0 ? Math.round((done / total) * 100) : 0
-  $('ipv-progress-fill').style.width = pct + '%'
-  const tail = fail > 0 ? `  · 실패 ${fail.toLocaleString()}` : ''
-  $('ipv-progress-label').textContent =
-    finished
-      ? (cancelled ? `취소됨 — ${ok.toLocaleString()} 추가${tail}` : `완료 — ${ok.toLocaleString()} 추가${tail}`)
-      : `${done.toLocaleString()} / ${total.toLocaleString()}${tail}`
-
-  if (finished) {
-    setTimeout(async () => {
-      show('ipv-enrich-progress', false)
-      // IP_INFO 캐시 재로드 → 리스트 즉시 새로 렌더(국기/회사 반영)
-      IP_INFO = (await window.api.getIpInfo()) || {}
-      renderIpList()
-      refreshEnrichButtonLabel()
-    }, 800)
-  }
 }
 
 // ── Syslog 대시보드 ───────────────────────────────────
@@ -1576,13 +1482,9 @@ function renderTableData(containerId, columns, rows, reloadFn) {
     for (const row of rows) {
       tbody += '<tr>'
       for (const col of columns) {
-        const raw = String(row[col] ?? '')
-        if (raw && IP_COLUMNS.has(col)) {
-          tbody += ipCellHtml(raw)               // 국기 + IP + VPN 배지
-        } else {
-          const cell = raw.length > 120 ? raw.slice(0, 120) + '…' : raw
-          tbody += `<td title="${esc(raw)}">${esc(cell)}</td>`
-        }
+        const raw  = String(row[col] ?? '')
+        const cell = raw.length > 120 ? raw.slice(0, 120) + '…' : raw
+        tbody += `<td title="${esc(raw)}">${esc(cell)}</td>`
       }
       tbody += '</tr>'
     }

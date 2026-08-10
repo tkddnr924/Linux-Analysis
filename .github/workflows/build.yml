@@ -45,19 +45,12 @@ jobs:
         working-directory: gui
         run: npm run build:win
 
-      # 3) 릴리스 자산 스테이징 — 뷰어 exe + config.ini(사용자 편집용, exe 옆에 두게)
-      - name: Stage release files
-        shell: bash
-        run: |
-          mkdir -p release
-          cp gui/dist/*.exe release/
-          cp config.ini     release/
-
+      # 3) 릴리스 자산 — 뷰어 exe 하나 (파서 exe 는 내장, 추가 설정 파일 없음)
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: linux-analysis-viewer
-          path: release/*
+          path: gui/dist/*.exe
 
   # ── GitHub Release 자동 생성 ─────────────────────────
   release:

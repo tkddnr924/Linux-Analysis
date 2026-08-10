@@ -777,40 +777,6 @@ body.col-resizing * { cursor: col-resize !important; user-select: none !importan
   letter-spacing: .04em;
 }
 
-/* IP enrich 버튼 + 진행 */
-.ipv-enrich { display: flex; flex-direction: column; gap: 4px; }
-.ipv-enrich-btn {
-  width: 100%;
-  padding: 5px 10px;
-  font-size: 11.5px;
-  font-weight: 600;
-  border-color: var(--accent-muted);
-  color: var(--accent);
-}
-.ipv-enrich-btn:hover { background: var(--accent-light); border-color: var(--accent); }
-.ipv-enrich-btn:disabled { opacity: .6; cursor: not-allowed; }
-.ipv-enrich-progress { display: flex; flex-direction: column; gap: 3px; padding-top: 2px; }
-.ipv-progress-bar {
-  height: 4px;
-  background: var(--border-light);
-  border-radius: 2px;
-  overflow: hidden;
-}
-.ipv-progress-fill {
-  height: 100%;
-  width: 0;
-  background: var(--accent);
-  transition: width .2s ease;
-}
-.ipv-progress-text {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  font-size: 10.5px;
-  color: var(--text-muted);
-  font-variant-numeric: tabular-nums;
-}
-
 .ipv-list {
   flex: 1;
   overflow-y: auto;
@@ -832,7 +798,6 @@ body.col-resizing * { cursor: col-resize !important; user-select: none !importan
   outline: 1px solid var(--accent-muted);
   outline-offset: -1px;
 }
-.ipv-row .ip-flag { margin-right: 2px; }
 .ipv-row-key {
   font-family: var(--font-mono);
   font-size: 11.5px;
@@ -892,30 +857,6 @@ body.col-resizing * { cursor: col-resize !important; user-select: none !importan
   font-size: 13px;
   padding: 40px;
   text-align: center;
-}
-
-/* IP enrich — 국기 + VPN 의심 배지 */
-.ip-flag {
-  display: inline-block;
-  margin-right: 4px;
-  font-size: 13px;
-  vertical-align: middle;
-  line-height: 1;
-}
-.ip-vpn {
-  display: inline-block;
-  margin-left: 6px;
-  padding: 0 5px;
-  font-family: var(--font-base);
-  font-size: 9.5px;
-  font-weight: 700;
-  letter-spacing: .04em;
-  color: var(--danger);
-  background: var(--danger-light);
-  border: 1px solid color-mix(in srgb, var(--danger) 30%, transparent);
-  border-radius: 3px;
-  vertical-align: middle;
-  line-height: 1.4;
 }
 
 /* ── 공통(자동) 대시보드 ──────────────────────────── */
