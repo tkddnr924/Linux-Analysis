@@ -6,6 +6,22 @@ contextBridge.exposeInMainWorld('api', {
   /** 파일 선택 다이얼로그 */
   openFile: () => ipcRenderer.invoke('dialog:openFile'),
 
+  // ── Pipeline (GUI 안에서 파서 실행) ─────────────────
+  /** 폴더 선택 다이얼로그 — 파싱 대상 target 폴더 */
+  pickTarget:      () => ipcRenderer.invoke('dialog:pickTarget'),
+  /** 파서 시작 — { target, output } → { code, cancelled, output } */
+  startPipeline:   (opts) => ipcRenderer.invoke('pipeline:start', opts),
+  /** 실행 중 파서 취소 */
+  cancelPipeline:  () => ipcRenderer.invoke('pipeline:cancel'),
+  /** 파서 실행 상태 */
+  pipelineRunning: () => ipcRenderer.invoke('pipeline:isRunning'),
+  /** 파서 로그 이벤트 구독 — cb({stream:'stdout'|'stderr'|'meta', line}). 해제 함수 반환 */
+  onPipelineLog: (cb) => {
+    const h = (_e, payload) => cb(payload)
+    ipcRenderer.on('pipeline-log', h)
+    return () => ipcRenderer.removeListener('pipeline-log', h)
+  },
+
   /** 자동 감지 parser.db 경로 반환 (없으면 null) */
   getAutoPath: () => ipcRenderer.invoke('db:getAutoPath'),
 

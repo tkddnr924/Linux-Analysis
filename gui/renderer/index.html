@@ -45,12 +45,35 @@
       <div id="welcome" class="welcome">
         <div class="welcome-inner">
           <h2>Linux Analysis Viewer</h2>
-          <p>parser.db 를 열어 파싱 결과를 확인하세요.</p>
-          <button class="btn btn-primary btn-lg" id="btn-open-2">DB 열기</button>
+          <p>기존 <code>parser.db</code> 를 열거나, target 폴더를 지정해 파싱을 진행하세요.</p>
+          <div class="welcome-actions">
+            <button class="btn btn-primary btn-lg" id="btn-open-2">DB 열기</button>
+            <button class="btn btn-ghost btn-lg"   id="btn-parse">폴더 선택해서 파싱</button>
+          </div>
           <p class="welcome-hint hidden" id="auto-hint">
             프로젝트 루트에서 <code>parser.db</code>를 자동 감지했습니다.
           </p>
         </div>
+      </div>
+
+      <!-- 파싱 진행 화면 -->
+      <div id="pipeline-view" class="pipeline-view hidden">
+        <div class="pipeline-header">
+          <div class="pipeline-title">
+            <span class="pipeline-spinner" id="pipeline-spinner"></span>
+            <h2 id="pipeline-title-text">파싱 진행 중</h2>
+          </div>
+          <div class="pipeline-meta">
+            <div>target: <code id="pipeline-target">—</code></div>
+            <div>output: <code id="pipeline-output">—</code></div>
+          </div>
+          <div class="pipeline-actions">
+            <button id="pipeline-cancel-btn" class="btn btn-ghost">취소</button>
+            <button id="pipeline-open-btn" class="btn btn-primary hidden">뷰어로 열기</button>
+            <button id="pipeline-back-btn" class="btn btn-ghost hidden">홈으로</button>
+          </div>
+        </div>
+        <div id="pipeline-log" class="pipeline-log"></div>
       </div>
 
       <!-- 시스템 정보 뷰 -->

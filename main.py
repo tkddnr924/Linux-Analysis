@@ -26,11 +26,20 @@ parser.db 공통:
   - .gz / .tar.gz / .tgz 압축 파일은 임시 디렉토리에 해제 후 파싱
 """
 
+import argparse
 import shutil
 import sqlite3
 import sys
 from pathlib import Path
 from datetime import datetime
+
+# Windows (특히 한국어 로케일) 에서 stdout/stderr 가 cp949 로 기본 인코딩되는데,
+# GUI 뷰어가 자식 프로세스 출력을 UTF-8 로 디코드하므로 여기서 강제 UTF-8 로 재구성.
+# reconfigure 는 3.7+ 부터, windowed/frozen 빌드에선 None 일 수 있어 guard.
+for _stream in (sys.stdout, sys.stderr):
+    if _stream is not None and hasattr(_stream, "reconfigure"):
+        try: _stream.reconfigure(encoding="utf-8", line_buffering=True)
+        except Exception: pass
 
 import parser.auditlog     as auditlog
 import parser.authlog      as authlog
@@ -47,10 +56,21 @@ import analyzer.sysinfo   as sysinfo_analyzer
 import analyzer.dashboard as dashboard_analyzer
 from parser.utils.files import md5 as file_md5, is_compressed, decompress
 
-# ── 설정 ──────────────────────────────────────────────
+# ── 설정 (CLI 인자로 오버라이드 가능) ──────────────────
 TARGET_DIR = Path("target")
 PARSER_DB  = Path("parser.db")
 DECOMP_DIR = Path(".decomp")   # 압축 해제 임시 디렉토리
+
+
+def _parse_args():
+    ap = argparse.ArgumentParser(
+        prog="linux-analyzer",
+        description="Linux 로그 분석기 — target 폴더에서 로그 파싱해 SQLite DB 생성",
+    )
+    ap.add_argument("--target",  type=Path, help="파싱 대상 폴더 (기본: ./target)")
+    ap.add_argument("--output",  type=Path, help="결과 DB 경로 (기본: ./parser.db)")
+    ap.add_argument("--decomp",  type=Path, help="압축 해제 임시 폴더 (기본: ./.decomp)")
+    return ap.parse_args()
 
 LOG_TARGETS = [
     {"name": "audit",   "glob": auditlog.AUDIT_LOG_GLOB, "module": auditlog},
@@ -379,4 +399,8 @@ def _process_parse(conn: sqlite3.Connection, name: str, files: list[Path], mod,
 
 
 if __name__ == "__main__":
+    args = _parse_args()
+    if args.target: TARGET_DIR = args.target
+    if args.output: PARSER_DB  = args.output
+    if args.decomp: DECOMP_DIR = args.decomp
     parse_logs()

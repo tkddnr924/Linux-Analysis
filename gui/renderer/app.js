@@ -195,6 +195,15 @@ function defaultColWidth(col) {
 async function init() {
   $('btn-open').addEventListener('click', openDb)
   $('btn-open-2').addEventListener('click', openDb)
+  $('btn-parse').addEventListener('click', startPipelineFromWelcome)
+  $('pipeline-cancel-btn').addEventListener('click', () => window.api.cancelPipeline())
+  $('pipeline-open-btn').addEventListener('click', () => {
+    if (_pipelineOutputPath) loadDb(_pipelineOutputPath)
+  })
+  $('pipeline-back-btn').addEventListener('click', () => {
+    show('pipeline-view', false); show('welcome', true)
+  })
+  window.api.onPipelineLog(onPipelineLog)
   $('btn-global-search').addEventListener('click', openGlobalSearch)
   $('gs-close').addEventListener('click', closeGlobalSearch)
   $('gs-overlay').addEventListener('click', closeGlobalSearch)
@@ -254,6 +263,70 @@ async function init() {
 async function openDb() {
   const fp = await window.api.openFile()
   if (fp) await loadDb(fp)
+}
+
+// ── 파싱 파이프라인 (GUI 내부에서 실행) ──────────────
+let _pipelineOutputPath = null
+
+async function startPipelineFromWelcome() {
+  const target = await window.api.pickTarget()
+  if (!target) return
+  // 결과 DB: target 폴더의 부모에 <target-이름>.db
+  const sep    = target.match(/\\/) ? '\\' : '/'
+  const parent = target.substring(0, target.lastIndexOf(sep)) || target
+  const name   = target.substring(target.lastIndexOf(sep) + 1) || 'target'
+  const output = `${parent}${sep}${name}.parser.db`
+  await runPipeline(target, output)
+}
+
+async function runPipeline(target, output) {
+  _pipelineOutputPath = output
+  // UI 상태
+  show('welcome', false); show('pipeline-view', true)
+  $('pipeline-target').textContent = target
+  $('pipeline-output').textContent = output
+  $('pipeline-title-text').textContent = '파싱 진행 중'
+  $('pipeline-spinner').className = 'pipeline-spinner'
+  $('pipeline-cancel-btn').classList.remove('hidden')
+  $('pipeline-open-btn').classList.add('hidden')
+  $('pipeline-back-btn').classList.add('hidden')
+  $('pipeline-log').innerHTML = ''
+
+  const r = await window.api.startPipeline({ target, output })
+
+  const spinner = $('pipeline-spinner')
+  $('pipeline-cancel-btn').classList.add('hidden')
+  $('pipeline-back-btn').classList.remove('hidden')
+
+  if (r?.code === 0 && !r.cancelled) {
+    spinner.classList.add('done')
+    $('pipeline-title-text').textContent = '파싱 완료'
+    $('pipeline-open-btn').classList.remove('hidden')
+    // 결과 DB 자동 로드
+    setTimeout(() => { if (_pipelineOutputPath) loadDb(_pipelineOutputPath) }, 300)
+  } else if (r?.cancelled) {
+    spinner.classList.add('done', 'error')
+    $('pipeline-title-text').textContent = '취소됨'
+  } else {
+    spinner.classList.add('done', 'error')
+    $('pipeline-title-text').textContent = `실패 (코드 ${r?.code ?? '?'})`
+  }
+}
+
+function onPipelineLog({ stream, line }) {
+  const el = $('pipeline-log')
+  if (!el) return
+  const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40
+  const cls = stream === 'stderr' ? 'pl-stderr'
+            : stream === 'meta'   ? 'pl-meta'
+                                  : 'pl-stdout'
+  const div = document.createElement('div')
+  div.className = `pl-line ${cls}`
+  div.textContent = line
+  el.appendChild(div)
+  // 라인 폭주 방지 — 최대 2000줄만 유지
+  while (el.childElementCount > 2000) el.removeChild(el.firstChild)
+  if (nearBottom) el.scrollTop = el.scrollHeight
 }
 
 async function loadDb(filePath) {
@@ -329,6 +402,7 @@ async function selectTable(tableName) {
   show('welcome', false); show('sysinfo-view', false)
   show('tab-empty', false); show('table-view', false)
   show('artifact-view', false); show('ip-view', false)
+  show('pipeline-view', false)
 
   if (tableName === 'sysinfo')         { await renderSysinfo(); return }
   if (ARTIFACT_TABLES.has(tableName))  { await selectArtifact(tableName); return }
@@ -623,6 +697,7 @@ async function selectIpView() {
     .forEach(b => b.classList.add('active'))
   show('welcome', false); show('sysinfo-view', false)
   show('tab-empty', false); show('table-view', false); show('artifact-view', false)
+  show('pipeline-view', false)
   show('ip-view', true)
 
   // 상태 초기화

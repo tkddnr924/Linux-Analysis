@@ -16,6 +16,13 @@
     "!node_modules/.bin/**"
   ],
 
+  "extraResources": [
+    {
+      "from": "../dist/linux-analyzer.exe",
+      "to":   "pipeline/linux-analyzer.exe"
+    }
+  ],
+
   "win": {
     "target": [
       { "target": "portable", "arch": ["x64"] }

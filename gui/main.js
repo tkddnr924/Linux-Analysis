@@ -1,9 +1,11 @@
 'use strict'
 
 const { app, BrowserWindow, ipcMain, dialog } = require('electron')
-const path     = require('path')
-const fs       = require('fs')
-const Database = require('better-sqlite3')
+const { spawn }  = require('child_process')
+const path       = require('path')
+const fs         = require('fs')
+const readline   = require('readline')
+const Database   = require('better-sqlite3')
 
 let win = null
 let db  = null
@@ -12,16 +14,118 @@ let currentDbPath = null
 // gui/ 의 부모(프로젝트 루트)에 있는 parser.db 자동 감지
 const AUTO_DB = path.join(__dirname, '..', 'parser.db')
 
+// ── 파서(pipeline) spawn 정책 ────────────────────────
+// dev  : venv 파이썬 + 프로젝트 루트 main.py
+// prod : 뷰어(.exe) 옆 resources/pipeline/linux-analyzer[.exe]
+function pipelineCommand () {
+  const isDev = !app.isPackaged
+  if (isDev) {
+    const root = path.resolve(__dirname, '..')
+    const py = process.platform === 'win32'
+      ? path.join(root, 'venv', 'Scripts', 'python.exe')
+      : path.join(root, 'venv', 'bin', 'python')
+    // venv 없으면 시스템 python3 로 폴백
+    const file = fs.existsSync(py)
+      ? py
+      : (process.platform === 'win32' ? 'python' : 'python3')
+    return { file, baseArgs: [path.join(root, 'main.py')], cwd: root }
+  }
+  const exeName = process.platform === 'win32' ? 'linux-analyzer.exe' : 'linux-analyzer'
+  return {
+    file: path.join(process.resourcesPath, 'pipeline', exeName),
+    baseArgs: [],
+    cwd: process.resourcesPath,
+  }
+}
+
+// 현재 실행 중인 파서 프로세스 (동시 실행 방지 + 취소용)
+let _pipelineProc = null
+
+// ── IPC: 폴더 선택 ──────────────────────────────────
+ipcMain.handle('dialog:pickTarget', async () => {
+  const r = await dialog.showOpenDialog(win, {
+    title: '파싱할 target 폴더 선택',
+    properties: ['openDirectory'],
+  })
+  return r.canceled ? null : r.filePaths[0]
+})
+
+// ── IPC: 파이프라인 실행 상태 ────────────────────────
+ipcMain.handle('pipeline:isRunning', () => !!_pipelineProc)
+
+// ── IPC: 파이프라인 취소 ────────────────────────────
+ipcMain.handle('pipeline:cancel', () => {
+  if (!_pipelineProc) return false
+  try { _pipelineProc.kill() } catch {}
+  return true
+})
+
+// ── IPC: 파이프라인 시작 ────────────────────────────
+// opts: { target: string, output: string }
+// 진행 로그는 event.sender.send('pipeline-log', {stream, line}) 로 실시간 emit.
+// resolve 값: { code, cancelled, output }
+ipcMain.handle('pipeline:start', async (event, opts = {}) => {
+  if (_pipelineProc) return { code: -1, error: '이미 실행 중' }
+  if (!opts.target) return { code: -1, error: 'target 필요' }
+  if (!opts.output) return { code: -1, error: 'output 필요' }
+
+  const { file, baseArgs, cwd } = pipelineCommand()
+  if (!fs.existsSync(file)) {
+    return { code: -1, error: `파서 실행 파일을 찾을 수 없음: ${file}` }
+  }
+
+  const args = [...baseArgs, '--target', opts.target, '--output', opts.output]
+  event.sender.send('pipeline-log', { stream: 'meta', line: `$ ${file} ${args.join(' ')}` })
+
+  return await new Promise((resolve) => {
+    let cancelled = false
+    let proc
+    try {
+      proc = spawn(file, args, {
+        cwd,
+        env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUNBUFFERED: '1' },
+      })
+    } catch (e) {
+      return resolve({ code: -1, error: e.message })
+    }
+    _pipelineProc = proc
+
+    // stdout/stderr 를 라인 단위로 렌더러에 전달
+    const rlOut = readline.createInterface({ input: proc.stdout })
+    const rlErr = readline.createInterface({ input: proc.stderr })
+    rlOut.on('line', line => event.sender.send('pipeline-log', { stream: 'stdout', line }))
+    rlErr.on('line', line => event.sender.send('pipeline-log', { stream: 'stderr', line }))
+
+    proc.on('error', (err) => {
+      event.sender.send('pipeline-log', { stream: 'meta', line: `[spawn error] ${err.message}` })
+    })
+
+    proc.on('close', (code, signal) => {
+      _pipelineProc = null
+      cancelled = signal === 'SIGTERM' || signal === 'SIGKILL'
+      event.sender.send('pipeline-log', {
+        stream: 'meta',
+        line: cancelled ? '[취소됨]' : `[종료 코드 ${code}]`,
+      })
+      resolve({ code: code ?? -1, cancelled, output: opts.output })
+    })
+
+    // 창이 닫히면 자식 프로세스도 정리
+    win?.once('closed', () => { try { proc.kill() } catch {} })
+  })
+})
+
 // ── IPinfo enrich (viewer 측) ─────────────────────────
 // 토큰 로드: env > .ipinfo_token > config.ini ([ipinfo] token)
 function _loadIpinfoToken () {
   const envTok = (process.env.IPINFO_TOKEN || '').trim()
   if (envTok) return envTok
   const dirs = [
+    process.env.PORTABLE_EXECUTABLE_DIR,  // Windows portable exe 를 실행한 폴더 (editable)
     process.cwd(),
     path.resolve(__dirname, '..'),
-    path.dirname(process.execPath),       // 패키징된 .exe 위치
-  ]
+    path.dirname(process.execPath),       // 패키징된 .exe 위치 또는 임시 추출 경로
+  ].filter(Boolean)
   for (const d of dirs) {
     const tokPath = path.join(d, '.ipinfo_token')
     try {
